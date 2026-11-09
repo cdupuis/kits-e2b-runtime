@@ -474,7 +474,9 @@ Key mechanisms (all under `pkg/sandbox/`):
   scratch directories.
 - **Networking** (`network/`): each sandbox gets a slot — a network namespace with a veth pair
   and a tap device, unique host-side IP (from a /16), NAT, and per-slot nftables egress firewall
-  (with SNI/Host-inspecting TCP firewall for domain allow/deny lists). Slots are pooled and
+  (with SNI/Host-inspecting TCP firewall for domain allow/deny lists). The v1 slot
+  enables IPv4 forwarding inside its new namespace so the TAP can route through
+  the veth independently of the host namespace's sysctl. Slots are pooled and
   reused; slot indexes are allocated locally against the node's netns state (leftover
   namespaces from a previous run are torn down by startup reclaim).
 - **Sandbox proxy** (:5007, `pkg/proxy/`): reverse-proxies incoming traffic from client-proxy to

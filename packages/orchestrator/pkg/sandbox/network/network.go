@@ -133,6 +133,12 @@ func (s *Slot) CreateNetwork(ctx context.Context) (retErr error) {
 
 	defer ns.Close()
 
+	// The TAP and veth live in this new namespace. Linux creates it with
+	// forwarding disabled regardless of the host namespace's setting.
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0o644); err != nil {
+		return fmt.Errorf("cannot enable IPv4 forwarding in sandbox namespace: %w", err)
+	}
+
 	// Create the Veth and Vpeer
 	vethAttrs := netlink.NewLinkAttrs()
 	vethAttrs.Name = s.VethName()
