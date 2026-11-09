@@ -885,17 +885,20 @@ func (c *Cache) copyProcessMemoryFromProc(ctx context.Context, pid int, ranges [
 		}
 		if int64(len(data)) != r.Size {
 			release()
+
 			return fmt.Errorf("process memory range exceeds cache size")
 		}
 		for copied := int64(0); copied < r.Size; {
 			if err := ctx.Err(); err != nil {
 				release()
+
 				return err
 			}
 			end := min(copied+1024*1024, r.Size)
 			n, err := f.ReadAt(data[copied:end], r.Start+copied)
 			if err != nil || int64(n) != end-copied {
 				release()
+
 				return fmt.Errorf("read process memory: read %d of %d bytes: %w", n, end-copied, errors.Join(err, io.ErrUnexpectedEOF))
 			}
 			copied = end

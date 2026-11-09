@@ -16,6 +16,8 @@ import (
 )
 
 func TestCreatedNamespaceForwardsIPv4(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("E2B_NETWORK_NAMESPACE_TESTS") == "" || os.Geteuid() != 0 {
 		t.Skip("requires root and E2B_NETWORK_NAMESPACE_TESTS=1")
 	}
