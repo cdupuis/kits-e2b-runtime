@@ -820,7 +820,7 @@ func (c *Cache) copyProcessMemory(
 	// Pre-split so no single iov exceeds MAX_RW_COUNT.
 	ranges := splitOversizedRanges(rs, getAlignedMaxRwCount(c.blockSize))
 
-	return drainIovs(ranges, func(r Range) int64 { return r.Size }, c.blockSize,
+	err := drainIovs(ranges, func(r Range) int64 { return r.Size }, c.blockSize,
 		func(off int64, batch []Range, batchBytes int64) error {
 			remote := make([]unix.RemoteIovec, len(batch))
 			for i, r := range batch {
@@ -860,6 +860,55 @@ func (c *Cache) copyProcessMemory(
 				return nil
 			}
 		})
+	if errors.Is(err, unix.ENOSYS) {
+		// Kernels without CONFIG_CROSS_MEMORY_ATTACH still expose process
+		// memory through procfs, subject to ptrace access checks. Do not use
+		// this path for permission errors or invalid memory mappings.
+		return c.copyProcessMemoryFromProc(ctx, pid, ranges)
+	}
+
+	return err
+}
+
+func (c *Cache) copyProcessMemoryFromProc(ctx context.Context, pid int, ranges []Range) error {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", pid))
+	if err != nil {
+		return fmt.Errorf("open process memory: %w", err)
+	}
+	defer f.Close()
+
+	var off int64
+	for _, r := range ranges {
+		data, release, err := c.addressBytes(off, r.Size)
+		if err != nil {
+			return err
+		}
+		if int64(len(data)) != r.Size {
+			release()
+
+			return errors.New("process memory range exceeds cache size")
+		}
+		for copied := int64(0); copied < r.Size; {
+			if err := ctx.Err(); err != nil {
+				release()
+
+				return err
+			}
+			end := min(copied+1024*1024, r.Size)
+			n, err := f.ReadAt(data[copied:end], r.Start+copied)
+			if err != nil || int64(n) != end-copied {
+				release()
+
+				return fmt.Errorf("read process memory: read %d of %d bytes: %w", n, end-copied, errors.Join(err, io.ErrUnexpectedEOF))
+			}
+			copied = end
+		}
+		release()
+		c.setIsCached(off, r.Size)
+		off += r.Size
+	}
+
+	return nil
 }
 
 // Split ranges so there are no ranges larger than maxSize.

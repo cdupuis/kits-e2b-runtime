@@ -12,6 +12,7 @@ require (
 	connectrpc.com/cors v0.1.0
 	github.com/awnumar/memguard v0.23.0
 	github.com/creack/pty v1.1.24
+	github.com/docker/kits-e2b v0.0.0-20261102212731-f23e47e89c00
 	github.com/e2b-dev/fsnotify v0.0.2
 	github.com/e2b-dev/infra/packages/shared v0.0.0
 	github.com/getkin/kin-openapi v0.152.0
@@ -32,7 +33,11 @@ require (
 require (
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/awnumar/memcall v0.4.0 // indirect
+	github.com/containerd/log v0.2.0 // indirect
+	github.com/containerd/platforms v1.0.0-rc.5 // indirect
 	github.com/dchest/uniuri v1.2.0 // indirect
+	github.com/distribution/reference v0.6.0 // indirect
+	github.com/docker/sandbox-kit-spec/v3 v3.0.0-m.11.0.20261030173352-0f9ea7ad72dd // indirect
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -40,6 +45,7 @@ require (
 	github.com/go-openapi/testify/v2 v2.8.0 // indirect
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/jackc/pgx/v5 v5.11.0 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/lufia/plan9stats v0.0.0-20260330125221-c963978e514e // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -48,11 +54,14 @@ require (
 	github.com/oasdiff/yaml3 v0.0.14 // indirect
 	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/onsi/gomega v1.38.2 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
+	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pkg/xattr v0.4.12 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/speakeasy-api/jsonpath v0.6.3 // indirect
 	github.com/speakeasy-api/openapi v1.24.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
@@ -67,4 +76,5 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/tools v0.51.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	oras.land/oras-go/v2 v2.6.4 // indirect
 )

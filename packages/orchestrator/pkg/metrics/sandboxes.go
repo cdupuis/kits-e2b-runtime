@@ -55,7 +55,7 @@ type (
 )
 
 type SandboxObserver struct {
-	meterExporter  sdkmetric.Exporter
+	meterProvider  *sdkmetric.MeterProvider
 	registration   metric.Registration
 	exportInterval time.Duration
 
@@ -76,6 +76,10 @@ type SandboxObserver struct {
 }
 
 func NewSandboxObserver(ctx context.Context, nodeID, serviceName, serviceCommit, serviceVersion, serviceInstanceID string, sandboxes *sandbox.Map) (*SandboxObserver, error) {
+	if telemetry.OTELCollectorGRPCEndpoint() == "" {
+		return &SandboxObserver{sandboxes: sandboxes}, nil
+	}
+
 	deltaTemporality := otlpmetricgrpc.WithTemporalitySelector(func(kind sdkmetric.InstrumentKind) metricdata.Temporality {
 		// Use delta temporality for gauges and cumulative for all other instrument kinds.
 		// This is used to prevent reporting sandbox metrics indefinitely.
@@ -165,7 +169,7 @@ func NewSandboxObserver(ctx context.Context, nodeID, serviceName, serviceCommit,
 
 	so := &SandboxObserver{
 		exportInterval: sandboxMetricExportPeriod,
-		meterExporter:  externalMeterExporter,
+		meterProvider:  meterProvider,
 		sandboxes:      sandboxes,
 		meter:          meter,
 		cpuTotal:       cpuTotal,
@@ -354,7 +358,7 @@ func (so *SandboxObserver) startObserving() (metric.Registration, error) {
 const meterExporterShutdownTimeout = 10 * time.Second
 
 func (so *SandboxObserver) Close(ctx context.Context) error {
-	if so.meterExporter == nil {
+	if so.meterProvider == nil {
 		return nil
 	}
 
@@ -370,7 +374,9 @@ func (so *SandboxObserver) Close(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, meterExporterShutdownTimeout)
 	defer cancel()
 
-	if err := so.meterExporter.Shutdown(shutdownCtx); err != nil {
+	// Stop the reader before its exporter; otherwise its background exports
+	// outlive Close and race the exporter's shutdown.
+	if err := so.meterProvider.Shutdown(shutdownCtx); err != nil {
 		errs = append(errs, fmt.Errorf("failed to shutdown sandbox observer meter provider: %w", err))
 	}
 

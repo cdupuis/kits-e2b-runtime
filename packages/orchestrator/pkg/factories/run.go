@@ -541,7 +541,8 @@ func run(config cfg.Config, opts Options) (success bool) {
 	// there's a panic.
 	defer func(g *errgroup.Group) {
 		err := g.Wait()
-		if err != nil {
+		var sde serviceDoneError
+		if err != nil && !errors.As(err, &sde) {
 			log.Printf("error while shutting down: %v", err)
 			success = false
 		}
@@ -829,7 +830,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create sandbox observer", zap.Error(err))
 	}
-	closers = append(closers, closer{"sandbox observer", sandboxObserver.Close})
+	closers = append(closers, cleanupCloser("sandbox observer", sandboxObserver.Close))
 
 	// host metrics — samples CPU in the background so GetCPUMetrics is a
 	// non-blocking cache read on the request path.
@@ -931,7 +932,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		return nil
 	})
-	closers = append(closers, closer{"device pool", devicePool.Close})
+	closers = append(closers, cleanupCloser("device pool", devicePool.Close))
 
 	// network pool
 	slotStorage, err := network.NewStorageLocal(ctx, config.NetworkConfig, egressSetup.Proxy)
@@ -1149,7 +1150,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		templatemanager.RegisterTemplateServiceServer(grpcServer, tmpl)
 
-		closers = append(closers, closer{"template server", tmpl.Close})
+		closers = append(closers, cleanupCloser("template server", tmpl.Close))
 	}
 
 	infoService := service.NewInfoService(serviceInfo, sandboxes, hostMetrics)
@@ -1206,6 +1207,9 @@ func run(config cfg.Config, opts Options) (success bool) {
 		}
 	})
 	closers = append(closers, closer{"http server", httpServer.Shutdown})
+	// Reverse-order teardown: join RPCs first, then stop guests before NFS,
+	// networking, devices and template resources can be closed beneath them.
+	closers = append(closers, cleanupCloser("sandboxes", orchestratorService.StopSandboxes))
 
 	// grpc server
 	startService("grpc server", func() error {
@@ -1243,7 +1247,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}
 
 	// Wait for services to be drained before closing them
-	if tmpl != nil {
+	if tmpl != nil && !config.ForceStop {
 		err := tmpl.Wait(closeCtx)
 		if err != nil {
 			logger.L().Error(ctx, "error while waiting for template manager to drain", zap.Error(err))

@@ -115,6 +115,8 @@ type Firewall struct {
 	userAllowSet set.Set
 
 	tapInterface string
+	kitPolicy    bool
+	controlAddr  netip.Addr
 
 	allowedRanges []string
 
@@ -153,6 +155,10 @@ var beforeFlush func()
 // the expressions of the rules the egress proxy puts ahead of the firewall's
 // own, EgressProxy.HeadFilterRules.
 func NewFirewall(netNSPath string, tapIf string, orchestratorInternalIP string, extraAllowedCIDRs []string, headFilter [][]expr.Any, nonDNSUDPMode NonDNSUDPMode) (_ *Firewall, err error) {
+	controlAddr, err := netip.ParseAddr(orchestratorInternalIP)
+	if err != nil || !controlAddr.Is4() {
+		return nil, fmt.Errorf("invalid orchestrator IPv4 address %q", orchestratorInternalIP)
+	}
 	netNS, err := ns.GetNS(netNSPath)
 	if err != nil {
 		return nil, fmt.Errorf("open slot network namespace: %w", err)
@@ -237,6 +243,7 @@ func NewFirewall(netNSPath string, tapIf string, orchestratorInternalIP string, 
 		userDenySet:        denySet,
 		userAllowSet:       allowSet,
 		tapInterface:       tapIf,
+		controlAddr:        controlAddr,
 		allowedRanges: append(
 			[]string{controlIP},
 			extraAllowedCIDRs...,
@@ -834,7 +841,7 @@ func (fw *Firewall) bufferUserRules(allowedCIDRs, deniedCIDRs []string) error {
 //
 // On any failure the conn is replaced via resetConn, so a poisoned batch can
 // never leak into a later flush.
-func (fw *Firewall) ApplyRules(ctx context.Context, byop bool, nonDNSUDPMode NonDNSUDPMode, allowedCIDRs, deniedCIDRs []string) (err error) {
+func (fw *Firewall) ApplyRules(ctx context.Context, byop bool, nonDNSUDPMode NonDNSUDPMode, allowedCIDRs, deniedCIDRs []string, kitPolicy ...bool) (err error) {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -850,11 +857,20 @@ func (fw *Firewall) ApplyRules(ctx context.Context, byop bool, nonDNSUDPMode Non
 
 	next := ChainDescriptor{Mode: nonDNSUDPMode, Posture: egressPosture(byop, allowedCIDRs, deniedCIDRs)}
 
-	return fw.replaceChainLocked(ctx, next, func(counter *nftables.CounterObj) error {
-		fw.installRules(byop, nonDNSUDPMode, counter)
+	err = fw.replaceChainLocked(ctx, next, func(counter *nftables.CounterObj) error {
+		if len(kitPolicy) > 0 && kitPolicy[0] {
+			fw.installKitRules()
+		} else {
+			fw.installRules(byop, nonDNSUDPMode, counter)
+		}
 
 		return fw.bufferUserRules(allowedCIDRs, deniedCIDRs)
 	})
+	if err == nil {
+		fw.kitPolicy = len(kitPolicy) > 0 && kitPolicy[0]
+	}
+
+	return err
 }
 
 // DenyEgress rebuilds the filter chain so that every packet originating from
@@ -896,7 +912,12 @@ func (fw *Firewall) DenyEgress(ctx context.Context) (err error) {
 		// Rule 1: ESTABLISHED/RELATED → accept, as in ApplyRules (lets the
 		// orchestrator-driven control path, which connects into the guest, get
 		// its replies back).
-		fw.addEstablishedAcceptRules()
+		if fw.kitPolicy {
+			fw.addKitReplyRule()
+			fw.addKitStorageRules()
+		} else {
+			fw.addEstablishedAcceptRules()
+		}
 		// Rule 2: everything else from the tap → drop, all protocols. No
 		// guest-initiated egress is allowed, not even to the orchestrator IP.
 		fw.addTapDropRule()
@@ -990,4 +1011,54 @@ func ipv4Range(cidr string) (start, end netip.Addr, ok bool) {
 	}
 
 	return netip.Addr{}, netip.Addr{}, false
+}
+
+// installKitRules admits control replies and public IPv4 TCP to the host proxy.
+// No DNS, UDP, IPv6, established guest-flow or platform CIDR bypass is admitted.
+// The proxy remains responsible for exact HTTP Host/TLS SNI grants.
+func (fw *Firewall) addKitReplyRule() {
+	fw.conn.AddRule(&nftables.Rule{Table: fw.table, Chain: fw.filterChain, Exprs: append(fw.tapIfaceMatch(),
+		&expr.Ct{Key: expr.CtKeyDIRECTION, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{1}},
+		&expr.Verdict{Kind: expr.VerdictAccept})})
+}
+
+func (fw *Firewall) installKitRules() {
+	fw.addKitReplyRule()
+	fw.addKitStorageRules()
+	// Even a publicly addressed control service gets only the two NFS ports.
+	fw.conn.AddRule(&nftables.Rule{Table: fw.table, Chain: fw.filterChain, Exprs: append(fw.tapIfaceMatch(),
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: fw.controlAddr.AsSlice()},
+		&expr.Verdict{Kind: expr.VerdictDrop})})
+	fw.addSetFilterRule(fw.predefinedDenySet.Set(), true)
+	fw.conn.AddRule(&nftables.Rule{Table: fw.table, Chain: fw.filterChain, Exprs: append(fw.tapIfaceMatch(),
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		&expr.Verdict{Kind: expr.VerdictAccept})})
+	fw.conn.AddRule(&nftables.Rule{Table: fw.table, Chain: fw.filterChain, Exprs: append(fw.tapIfaceMatch(), &expr.Verdict{Kind: expr.VerdictDrop})})
+}
+
+// Only the NFS proxy and portmapper may be reached on the control address.
+// Authorization is still checked against this sandbox's trusted mount list.
+func (fw *Firewall) addKitStorageRules() {
+	if !fw.controlAddr.Is4() {
+		return
+	}
+	for _, port := range []uint16{111, 2049} {
+		fw.conn.AddRule(&nftables.Rule{Table: fw.table, Chain: fw.filterChain, Exprs: append(fw.tapIfaceMatch(),
+			&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: fw.controlAddr.AsSlice()},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{byte(port >> 8), byte(port)}},
+			&expr.Verdict{Kind: expr.VerdictAccept})})
+	}
 }

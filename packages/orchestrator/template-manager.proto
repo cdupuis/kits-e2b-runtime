@@ -84,6 +84,8 @@ message TemplateConfig {
   oneof source {
     string fromImage = 11;
     FromTemplateConfig fromTemplate = 14;
+    // Validated KitSource JSON. Kept opaque across the RPC boundary.
+    string fromKit = 19;
   }
 
   optional FromImageRegistry fromImageRegistry = 15;

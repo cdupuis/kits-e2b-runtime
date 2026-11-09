@@ -1314,6 +1314,16 @@ components:
           type: boolean
           deprecated: true
           description: Automatically pauses the sandbox after the timeout
+        kitTemplateID:
+          type: string
+          minLength: 1
+          description: >-
+            Local native Kit recreation only. Replace the paused instance's writable
+            filesystem with this accessible pristine Kit template, keeping the sandbox
+            ID and instance-owned volumes. Install and startup hooks run again.
+            Requires native storage on the API and worker. Incompatible retained
+            volume requests refuse without deleting the paused snapshot or storage.
+            Cannot be combined with memory. Ordinary resume leaves this absent.
         memory:
           type: boolean
           description: >-
@@ -2749,10 +2759,54 @@ components:
           type: string
           description: Password to use for the registry
 
+    KitSource:
+      type: object
+      additionalProperties: false
+      required: [references]
+      properties:
+        references:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            minLength: 1
+        args:
+          type: object
+          description: Kit argument overrides compiled into this template.
+          additionalProperties:
+            type: string
+        env:
+          type: object
+          description: Final Kit environment overrides compiled into this template.
+          additionalProperties:
+            type: string
+        options:
+          type: object
+          additionalProperties: false
+          properties:
+            rejectCapabilities:
+              type: array
+              description: Capability types to decline during host selection; cannot enable worker features.
+              items:
+                type: string
+            ephemeralVolumes:
+              type: boolean
+            ignoreAgentSessions:
+              type: boolean
+            hostOnlyNetwork:
+              type: boolean
+            secretBindings:
+              type: object
+              additionalProperties:
+                type: string
+
     TemplateBuildStartV2:
       type: object
-      description: Exactly one of fromImage or fromTemplate must be given and non-empty.
+      description: Exactly one of fromImage, fromTemplate or fromKit must be given.
       properties:
+        fromKit:
+          $ref: "#/components/schemas/KitSource"
         fromImage:
           type: string
           minLength: 1

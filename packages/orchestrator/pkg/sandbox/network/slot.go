@@ -414,7 +414,7 @@ func (s *Slot) reapplyNonDNSUDPMode(ctx context.Context) (bool, error) {
 	}
 
 	egress := s.tenantEgress
-	if err := fw.ApplyRules(ctx, egress.GetEgressProxyAddress() != "", mode, egress.GetAllowedCidrs(), egress.GetDeniedCidrs()); err != nil {
+	if err := fw.ApplyRules(ctx, egress.GetEgressProxyAddress() != "", mode, egress.GetAllowedCidrs(), egress.GetDeniedCidrs(), egress.GetKitPolicy()); err != nil {
 		return false, err
 	}
 
@@ -594,7 +594,7 @@ func (s *Slot) ConfigureInternet(ctx context.Context, network *orchestrator.Sand
 		s.firewallCustomRules.Store(true)
 	}
 
-	if err := fw.ApplyRules(ctx, hasBYOP, mode, egress.GetAllowedCidrs(), egress.GetDeniedCidrs()); err != nil {
+	if err := fw.ApplyRules(ctx, hasBYOP, mode, egress.GetAllowedCidrs(), egress.GetDeniedCidrs(), egress.GetKitPolicy()); err != nil {
 		return err
 	}
 	s.rememberTenant(ctx, egress)
@@ -624,7 +624,7 @@ func (s *Slot) UpdateInternet(ctx context.Context, egress *orchestrator.SandboxN
 	// Set before mutating: a partial failure must still trigger cleanup.
 	s.firewallCustomRules.Store(true)
 
-	if err := fw.ApplyRules(ctx, hasBYOP, s.currentNonDNSUDPMode(ctx), allowedCIDRs, deniedCIDRs); err != nil {
+	if err := fw.ApplyRules(ctx, hasBYOP, s.currentNonDNSUDPMode(ctx), allowedCIDRs, deniedCIDRs, egress.GetKitPolicy()); err != nil {
 		return err
 	}
 	s.rememberTenant(ctx, egress)

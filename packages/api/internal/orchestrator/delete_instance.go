@@ -449,12 +449,17 @@ func (o *Orchestrator) killSandboxOnNode(
 			logger.WithNodeID(node.ID),
 			zap.String("kill_reason", killReason),
 		)
-
-		return nil
 	} else if err != nil {
 		return fmt.Errorf("failed to delete sandbox: %w", err)
 	}
 
+	// Explicit DELETE first removes any resumable snapshot in the handler.
+	// If that deletion fails, its snapshot and private data must both survive.
+	if reason != sandbox.KillReasonRequest {
+		if err := o.removeExpiredKitStorage(ctx, sbx); err != nil {
+			return fmt.Errorf("remove Kit storage: %w", err)
+		}
+	}
 	node.OptimisticRemove(ctx, nodeSandboxResources(sbx))
 
 	return nil

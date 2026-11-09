@@ -166,10 +166,15 @@ func TestPostV2TemplatesTemplateIDBuildsBuildIDRequiresSource(t *testing.T) {
 
 	// The V1 flow sent an empty fromImage; it must fail as client input before the build row is touched.
 	for _, tt := range []struct{ name, body, message string }{
-		{"no source", `{"steps":[]}`, "must specify either fromImage or fromTemplate"},
-		{"empty fromImage", `{"fromImage":"","steps":[]}`, "must specify either fromImage or fromTemplate"},
-		{"empty fromTemplate", `{"fromTemplate":"","steps":[]}`, "must specify either fromImage or fromTemplate"},
-		{"both sources", `{"fromImage":"alpine","fromTemplate":"base","steps":[]}`, "cannot specify both fromImage and fromTemplate"},
+		{"empty kit", `{"fromKit":{"references":[]}}`, "Kit source requires"},
+		{"empty kit reference", `{"fromKit":{"references":[""]}}`, "Kit source requires"},
+		{"kit and image", `{"fromImage":"alpine","fromKit":{"references":["example/kit:1"]}}`, "must specify exactly one"},
+		{"kit and steps", `{"fromKit":{"references":["example/kit:1"]},"steps":[{"type":"RUN","args":["true"]}]}`, "Kit sources cannot"},
+		{"kit and start command", `{"fromKit":{"references":["example/kit:1"]},"startCmd":"true"}`, "Kit sources cannot"},
+		{"no source", `{"steps":[]}`, "must specify exactly one of fromImage, fromTemplate or fromKit"},
+		{"empty fromImage", `{"fromImage":"","steps":[]}`, "must specify exactly one of fromImage, fromTemplate or fromKit"},
+		{"empty fromTemplate", `{"fromTemplate":"","steps":[]}`, "must specify exactly one of fromImage, fromTemplate or fromKit"},
+		{"both sources", `{"fromImage":"alpine","fromTemplate":"base","steps":[]}`, "must specify exactly one of fromImage, fromTemplate or fromKit"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

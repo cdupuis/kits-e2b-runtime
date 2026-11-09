@@ -456,7 +456,16 @@ Process shutdown, triggered by `SIGINT`, `SIGTERM`, `SIGUSR1`, or a service fail
 the node to `ShuttingDown` before draining builds and sandboxes. Like `Draining`, this excludes new
 placement while existing work stays reachable, and `/health` returns HTTP 200 with status
 `draining`. Unlike reversible `Draining`, `ShuttingDown` is terminal for the process;
-status overrides cannot enter or leave it. `FORCE_STOP` skips waiting for sandboxes to exit.
+status overrides cannot enter or leave it. `FORCE_STOP` skips build and sandbox drains.
+After gRPC handlers finish, remaining guest processes are stopped concurrently
+and their lifecycle cleanup is joined before NFS, networking, device pools or
+template resources close. This step has its own 30-second cleanup budget even
+on forced stop; it releases port publications and private-storage leases while
+retaining storage for control-plane recovery and deletion decisions.
+Device-pool, template-resource and sandbox-observer cleanup each receive a fresh
+30-second context even when forced stop cancels the drain context. The observer
+shuts down its meter provider, stopping the periodic reader before its exporter;
+without a configured telemetry collector, it starts neither.
 The sandbox drain ends only when no sandbox is live and the node's outstanding work (below) is
 zero, so a create or a resume-fresh checkpoint in flight, whose sandbox is briefly not live, holds
 it until its sandbox goes live and then ends.
@@ -499,6 +508,9 @@ Key mechanisms (all under `pkg/sandbox/`):
 - **Lazy memory / UFFD** (`uffd/`): on resume, Firecracker restores the VM without loading
   memory; a userfaultfd handler serves page faults directly from the template's memfile, so only
   touched pages are read. An optional prefetcher warms known-hot pages.
+  Snapshot export uses the shared memfd when available, otherwise `process_vm_readv`.
+  Kernels without `CONFIG_CROSS_MEMORY_ATTACH` use bounded reads from `/proc/<pid>/mem`
+  when that syscall returns `ENOSYS`; procfs access still requires ptrace permission.
 - **Copy-on-write rootfs** (`rootfs/`, `nbd/`, `block/`): the template rootfs stays read-only;
   writes go to a per-sandbox COW cache exposed to Firecracker as an NBD block device served by
   an in-process userspace NBD server. On pause, the dirty blocks are exported as a diff.
@@ -521,7 +533,9 @@ Key mechanisms (all under `pkg/sandbox/`):
   scratch directories.
 - **Networking** (`network/`): each sandbox gets a slot — a network namespace with a veth pair
   and a tap device, unique host-side IP (from a /16), NAT, and per-slot nftables egress firewall
-  (with SNI/Host-inspecting TCP firewall for domain allow/deny lists). Slots are pooled and
+  (with SNI/Host-inspecting TCP firewall for domain allow/deny lists). The v1 slot
+  enables IPv4 forwarding inside its new namespace so the TAP can route through
+  the veth independently of the host namespace's sysctl. Slots are pooled and
   reused; slot indexes are allocated locally against the node's netns state (leftover
   namespaces from a previous run are torn down by startup reclaim).
 - **Sandbox proxy** (:5007, `pkg/proxy/`): reverse-proxies incoming traffic from client-proxy to
@@ -1367,3 +1381,163 @@ embed/                  E2B Embed: the whole stack on one machine (Compose, Terr
 Cross-service contracts are all generated: OpenAPI specs in `spec/`, gRPC protos in
 `packages/orchestrator/*.proto` and `packages/envd/spec/`, SQL in `packages/db/queries/`.
 Run `make generate` after changing any of them.
+
+### Experimental native Kit v3 templates
+
+`fromKit` is an alternative to `fromImage`/`fromTemplate` in the v2 build-start
+payload. The template manager resolves and composes public OCI Kit artifacts with
+the Kit v3 library, supplies the resulting image to the existing ext4 builder,
+and retains a validated bundle in template metadata. It skips the normal default
+user phase and skips finalize's convenience account, sudo, home-ownership and
+world-writable directory changes to preserve the Kit's identities and permissions.
+Shared template creation does not run Kit lifecycle hooks or the declared workload. Additional build steps and
+ordinary derivation from Kit templates are refused.
+
+`fromKit.args` supplies named Kit argument overrides to each declaring contributor;
+unknown argument names fail preparation. `fromKit.env` overrides the final image
+environment before declaration expansion and selection, preserving explicit empty
+values. Both maps are compiled into the immutable template plan and cache identity.
+They do not enable environment overrides on sandbox creation or resume.
+
+The paired Kit adapter selects one agent-context version for the composition:
+required declarations take precedence, otherwise @2 is preferred. Optional
+declarations of the other version are recorded as skipped; requiring both
+versions still fails the spec's composition checks.
+
+For Kit instances, the orchestrator owns install/runtime grants and lifecycle
+state before live registration. Install hooks run per instance; a filesystem
+snapshot and fresh VM boot form the phase boundary. Startup then runs and envd
+starts the declared interactive workload under tag `kit-workload`. envd includes
+an isolated re-exec helper for requests staged under `/run/e2b-kit`; it verifies
+identities and drops privileges in the child. Existing Process APIs handle
+attachment, terminal input and resize. Memory resume retains the process;
+filesystem resume reruns startup. Installed snapshots are bound to their original
+sandbox ID and cannot be forked as a fresh Kit instance.
+The workload Start handshake retains create cancellation but does not serialize
+its deadline as an envd process timeout; sandbox TTL controls the detached
+workload's maximum lifetime. On kernels without cross-memory-attach support,
+snapshot memory copying falls back to ptrace-checked `/proc/<pid>/mem` reads
+only when `process_vm_readv` returns `ENOSYS`, never for permission errors.
+
+An internal `kit_policy` egress setting closes DNS, non-TCP, IPv6 and platform
+allow-set exceptions while CE's TCP proxy enforces exact Host/SNI grants.
+Credential-bearing plans require the opt-in native HTTPS injector in the CE proxy.
+It consumes a host-owned, project-scoped JSON secret store and a dedicated CA via
+`NATIVE_KIT_SECRETS_FILE`, `NATIVE_KIT_CA_CERT_FILE` and `NATIVE_KIT_CA_KEY_FILE`.
+This local Embed provider is separate from the management-only `/secrets` contract;
+there is no new public secret-read API. Names remain in template metadata, while
+values resolve against the creating team's UUID before VM boot and on every HTTPS
+request. Install-only bindings are not required after installation. envd installs
+only the public CA; the interactive workload environment gives Node its bundle
+path. Hook environments retain their declaration allowlist without automatic
+Node variables.
+The proxy intercepts credential destinations on port 443, validates HTTP authority
+against SNI/current phase policy, verifies upstream TLS and public host-resolved IPs,
+and replaces headers after stripping hop headers. It refuses plaintext credential
+traffic, CONNECT and upgrades, supports HTTP/1.1 streaming, and does not follow
+redirects. Atomic store replacement rotates values; deletion blocks new requests,
+including on existing TLS connections. In-flight requests may finish. The files
+must be provisioned on each eligible worker; a common CA preserves trust across
+memory resume. Without this explicit configuration, credential admission fails. Unsupported contracts remain admission errors, with explicit recorded
+volume and host-only compatibility options. Both agent-session capability types
+are retained as metadata by default without implementing session management. Kit egress cannot be widened
+through sandbox updates. The API applies network updates before saving them,
+under the sandbox record lock with a ten-second node-call deadline, so a worker
+refusal cannot change the configuration used for a later resume. This prototype requires all three patched components;
+see `examples/native-kit/README.md` for component and local KVM lifecycle evidence,
+the published adapter dependency, remaining validation, and snapshot-retention limitations.
+
+
+Native Kit startup also exposes bundled skills under every declared discovery
+directory as the workload user, with host skill sharing disabled. Admission uses
+the selected discovery directories: with none available, required bundles refuse
+before template creation and optional bundles/groups retain spec skip records. It records
+links and optional skips in the workload home's local state; existing user skills
+are never overwritten. Context @1 uses per-contributor indexes and adjacent inline
+body files, while @2 retains its inline profiles. ACP declarations produce
+workload-user stdio launchers and an agent/protocol index under the workload
+home's local share directory; they do not start ACP agents automatically. Resource
+requirements take selected contribution maxima, and both template building and
+sandbox create/resume refuse CPU/memory allocations below those requirements.
+E2B's explicit TTL/kill model supplies the long-running contract independently of
+client attachment. See the native Kit guide for supported subsets and VM evidence.
+
+### Native Kit storage (local Embed prototype)
+
+`NATIVE_KIT_STORAGE_ROOT` enables instance-private volumes and Kit-shared host
+directories. The API and orchestrator mount the same private root. The registry
+keys private storage by authenticated team, stable sandbox ID and destination;
+shared storage substitutes the canonical published Kit repository for sandbox ID.
+Metadata and advisory request settings live outside exported directories.
+
+The orchestrator allocates storage before boot and gives envd generated NFS
+mounts through the existing volume initialization path. The reserved `native-kit`
+backend maps to the registry's data directory. Client volume overrides cannot
+select that backend. The existing NFS proxy confines exports to the network
+lifecycle's trusted mount list and tenant. Native Kit firewall rules admit only
+TCP 111/2049 to the orchestrator address for storage; checkpoint isolation keeps
+that allowance so hard NFS mounts can drain. Tmpfs is mounted by the envd Kit
+executor before hooks and again after a cold boot.
+
+An instance file lock survives VM replacement through reference-counted leases.
+VM cleanup releases its lease after stopping the guest and releasing its network;
+checkpoint replacement retains an additional reference across the gap. Failed fresh
+creates remove private storage after VM rollback releases all leases. Failed resumes
+retain private storage for a retry. Automatic kills and timeout eviction remove
+private directories after all leases close only when no resumable pause snapshot
+remains. A resumed VM's earlier E2B snapshot can survive TTL expiry; its private
+data survives too. Snapshot lookup failures preserve data. Explicit
+DELETE first removes snapshots, then storage, so a failed snapshot deletion keeps
+resumable data. Paused instance deletion also removes retained private storage.
+Host-shared directories survive and are discoverable through the shared registry.
+The local storage library lists those directories by authenticated team and
+canonical published Kit repository, reads bounded regular files through a
+directory-confined handle, and removes shares by opaque listing ID. Removal
+serializes with allocation and instance deletion, refusing any share still
+referenced by an instance record, including a paused instance. The native TCK
+adapter uses these host observations independently of guest exec.
+Private block allocations also have an independent host-owned index outside exports.
+Inspection and deletion consult that index as well as instance metadata, so a lost
+instance record cannot hide or strand retained backing directories.
+
+A paused native instance can be recreated through the existing resume reservation
+with `kitTemplateID`: the API checks access to the replacement template, keeps the
+original sandbox ID and node affinity, and requests a fresh filesystem boot. The
+worker requires a pristine Kit template and an existing local storage record,
+validates all retained volume settings before allocation, and runs install/startup
+again. The old writable rootfs is discarded; omitted volume paths stay allocated
+but unmounted, and tmpfs starts empty. Failed recreation keeps the paused snapshot
+and private storage for recovery. Explicit worker invalid-argument refusals for
+the requested replacement return HTTP 400; infrastructure failures retain their
+server status. Ordinary resume has no template override. This
+requires the API and worker to share the configured native storage root; it does
+not introduce distributed volume scheduling.
+Instance deletion does not collect durable local snapshot objects, including
+install-boundary layers; the file-store deployment has no automatic collector
+configured. These layers must remain while a resumable descendant references
+them. Template cache release does not reclaim durable object storage.
+This backend requires one durable local Embed storage root; distributed placement
+and end-to-end runtime conformance have not been validated.
+
+### Native Kit loopback ports (local Embed prototype)
+
+`NATIVE_KIT_PORTS_DIR` enables the `port@1` handler on a worker. The builder
+selects TCP/UDP declarations for IPv4 or dual services; IPv6-only requests
+are refused or skipped according to optionality. Client source options
+cannot enable this backend. The managed adapter refuses native-port plans.
+
+After instance initialization, live promotion allocates loopback ephemeral
+listeners targeting the current sandbox slot's IPv4 address. Raw TCP
+forwarding preserves half-closes. UDP has a separate upstream socket per
+client, bounded by the instance socket limit and a one-minute idle timeout.
+Neither build VMs nor install-phase VMs or prefetch harvests publish ports.
+Stop and priority cleanup close listeners and all active forwarding before
+slot reuse. Checkpoint replacement and resume allocate fresh host ports.
+
+The registry contains team/instance/lifecycle JSON records with names,
+container ports, transports, service families and allocated addresses.
+Each record is locked for its publisher's lifetime. The host-side
+`native-kit.py ports` command omits unlocked crash leftovers. Records and
+listeners stay on the local worker; there is no new API endpoint or remote
+port scheduler. Local Embed's host networking makes these listeners host
+loopback endpoints. E2B's existing HTTP ingress path is unchanged.

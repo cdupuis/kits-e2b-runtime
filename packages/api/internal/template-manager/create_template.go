@@ -2,6 +2,7 @@ package template_manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -56,6 +57,7 @@ func (tm *TemplateManager) CreateTemplate(
 	clusterID uuid.UUID,
 	nodeID string,
 	version string,
+	kitSources ...*api.KitSource,
 ) (e error) {
 	ctx, span := tracer.Start(ctx, "create-template",
 		trace.WithAttributes(
@@ -130,7 +132,15 @@ func (tm *TemplateManager) CreateTemplate(
 		FromImageRegistry:  imageRegistry,
 	}
 
-	err = setTemplateSource(ctx, tm, teamID, teamSlug, template, fromImage, fromTemplate)
+	if len(kitSources) > 0 && kitSources[0] != nil {
+		var raw []byte
+		raw, err = json.Marshal(kitSources[0])
+		if err == nil {
+			template.Source = &templatemanagergrpc.TemplateConfig_FromKit{FromKit: string(raw)}
+		}
+	} else {
+		err = setTemplateSource(ctx, tm, teamID, teamSlug, template, fromImage, fromTemplate)
+	}
 	if err != nil {
 		// If the error is related to fromTemplate, set the build status to failed with the appropriate message
 		// This is to unify the error handling with fromImage errors

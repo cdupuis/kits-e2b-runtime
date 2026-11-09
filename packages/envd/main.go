@@ -20,6 +20,7 @@ import (
 	"github.com/e2b-dev/infra/packages/envd/internal/api"
 	"github.com/e2b-dev/infra/packages/envd/internal/execcontext"
 	"github.com/e2b-dev/infra/packages/envd/internal/host"
+	_ "github.com/e2b-dev/infra/packages/envd/internal/kit"
 	"github.com/e2b-dev/infra/packages/envd/internal/logs"
 	"github.com/e2b-dev/infra/packages/envd/internal/logs/exporter"
 	"github.com/e2b-dev/infra/packages/envd/internal/permissions"

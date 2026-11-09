@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
 	"strings"
 
+	e2b "github.com/docker/kits-e2b"
 	"go.opentelemetry.io/otel"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
@@ -189,6 +191,11 @@ type Balloon struct {
 }
 
 type Template struct {
+	// Host-authoritative Kit declaration, retained across pause and resume.
+	Kit           *e2b.Bundle `json:"kit,omitempty"`
+	KitInstalled  bool        `json:"kit_installed,omitempty"`
+	KitInstanceID string      `json:"kit_instance_id,omitempty"`
+
 	Version      uint64           `json:"version"`
 	Template     TemplateMetadata `json:"template"`
 	Context      Context          `json:"context"`
@@ -403,6 +410,7 @@ func (t Template) BasedOn(
 	ft FromTemplate,
 ) Template {
 	return Template{
+		Kit: t.Kit, KitInstalled: t.KitInstalled, KitInstanceID: t.KitInstanceID,
 		Version:      CurrentVersion,
 		Template:     t.Template,
 		Context:      t.Context,
@@ -415,6 +423,7 @@ func (t Template) BasedOn(
 
 func (t Template) NewVersionTemplate(metadata TemplateMetadata) Template {
 	return Template{
+		Kit: t.Kit, KitInstalled: t.KitInstalled, KitInstanceID: t.KitInstanceID,
 		Version:          CurrentVersion,
 		Template:         metadata,
 		Context:          t.Context,
@@ -435,6 +444,7 @@ func (t Template) NewVersionTemplate(metadata TemplateMetadata) Template {
 
 func (t Template) SameVersionTemplate(metadata TemplateMetadata) Template {
 	return Template{
+		Kit: t.Kit, KitInstalled: t.KitInstalled, KitInstanceID: t.KitInstanceID,
 		Version:          t.Version,
 		Template:         metadata,
 		Context:          t.Context,
@@ -473,6 +483,7 @@ func (t Template) WithVcpuCount(vcpus int64) Template {
 // WithPrefetch returns a copy of the template with the given prefetch mapping.
 func (t Template) WithPrefetch(prefetch *Prefetch) Template {
 	return Template{
+		Kit: t.Kit, KitInstalled: t.KitInstalled, KitInstanceID: t.KitInstanceID,
 		Version:            t.Version,
 		Template:           t.Template,
 		Context:            t.Context,
@@ -625,6 +636,14 @@ func deserializeWith(reader io.Reader, guests guestCheck) (Template, error) {
 			return Template{}, fmt.Errorf("template metadata version %v cannot carry %s %q: it needs version %d or later", v.Version, key, raw, DeprecatedVersion+1)
 		}
 
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(data, &fields)
+		for k, value := range fields {
+			if (strings.EqualFold(k, "kit") || strings.EqualFold(k, "kit_installed")) && string(value) != "null" && string(value) != "false" {
+				return Template{}, errors.New("deprecated metadata cannot carry Kit authority")
+			}
+		}
+
 		return Template{Version: DeprecatedVersion}, nil
 	}
 
@@ -632,6 +651,10 @@ func deserializeWith(reader io.Reader, guests guestCheck) (Template, error) {
 	err = json.Unmarshal(data, &templateMetadata)
 	if err != nil {
 		return Template{}, fmt.Errorf("error unmarshaling template metadata: %w", err)
+	}
+
+	if templateMetadata.Kit == nil && (templateMetadata.KitInstalled || templateMetadata.KitInstanceID != "") {
+		return Template{}, errors.New("kit instance state without Kit declaration")
 	}
 
 	if key, raw, retired := guestOSKeyIn(data); retired {

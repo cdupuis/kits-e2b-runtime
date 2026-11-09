@@ -74,6 +74,20 @@ func domainHandler(ctx context.Context, c egressConn) {
 		return
 	}
 
+	// Native credential destinations require HTTPS and an explicit injector.
+	hostname = strings.ToLower(hostname)
+	policy := c.sbx.Config.GetNetworkEgress()
+	if policy.GetKitPolicy() && len(policy.GetRules()[hostname].GetRules()) > 0 {
+		if c.kitInjector == nil || c.protocol != ProtocolTLS || c.dstPort != 443 {
+			c.conn.Close()
+
+			return
+		}
+		c.kitInjector.serve(ctx, c, hostname)
+
+		return
+	}
+
 	c.metrics.RecordDecision(ctx, DecisionAllowed, c.protocol, matchType)
 
 	// When allowed by domain match, dial the hostname directly (not the sandbox's resolved IP).

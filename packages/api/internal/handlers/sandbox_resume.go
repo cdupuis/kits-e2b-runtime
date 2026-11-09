@@ -20,6 +20,7 @@ import (
 	"github.com/e2b-dev/infra/packages/db/pkg/types"
 	"github.com/e2b-dev/infra/packages/db/queries"
 	"github.com/e2b-dev/infra/packages/shared/pkg/apierrors"
+	"github.com/e2b-dev/infra/packages/shared/pkg/clusters"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/ginutils"
 	orchestratorgrpc "github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
@@ -176,6 +177,18 @@ func (a *APIStore) PostSandboxesSandboxIDResume(c *gin.Context, sandboxID api.Sa
 		return
 	}
 
+	if body.KitTemplateID != nil && body.Memory != nil {
+		a.sendAPIStoreError(c, http.StatusBadRequest, "kitTemplateID cannot be combined with memory")
+
+		return
+	}
+	fetcher := a.buildResumeSandboxData(sandboxID, body.AutoPause, body.Memory)
+	demandColdBoot := demandsFilesystemBoot(body.Memory, lastSnapshot.Snapshot)
+	if body.KitTemplateID != nil {
+		fetcher = a.buildKitRecreateData(sandboxID, teamInfo.Team.ID, clusters.WithClusterFallback(teamInfo.Team.ClusterID), *body.KitTemplateID, fetcher)
+		demandColdBoot = true // A recreation must never join an ordinary resume.
+	}
+
 	// Pre-flight of the fetcher's authoritative gate so a disabled flag answers
 	// 400 even when the start would otherwise join an in-flight one (409).
 	if _, apiErr := resolveFilesystemBoot(ctx, a.featureFlags, body.Memory, lastSnapshot.Snapshot); apiErr != nil {
@@ -196,10 +209,10 @@ func (a *APIStore) PostSandboxesSandboxIDResume(c *gin.Context, sandboxID api.Sa
 		sandboxID,
 		timeout,
 		teamInfo,
-		a.buildResumeSandboxData(sandboxID, body.AutoPause, body.Memory),
+		fetcher,
 		&c.Request.Header,
 		true,
-		demandsFilesystemBoot(body.Memory, lastSnapshot.Snapshot),
+		demandColdBoot,
 		nil, // mcp
 	)
 	setMemoryOverrideOutcome(c, body.Memory, createErr)

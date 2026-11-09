@@ -6,11 +6,32 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
+
+func TestCreatedNamespaceForwardsIPv4(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv("E2B_NETWORK_NAMESPACE_TESTS") == "" || os.Geteuid() != 0 {
+		t.Skip("requires root and E2B_NETWORK_NAMESPACE_TESTS=1")
+	}
+	slot, err := NewSlot("forwarding-test", 30000, Config{OrchestratorInSandboxIPAddress: "192.0.2.1"}, NewNoopEgressProxy())
+	require.NoError(t, err)
+	if _, err := os.Stat(filepath.Join(NetNamespacesDir, slot.NamespaceID())); !os.IsNotExist(err) {
+		t.Skip("test slot namespace is already in use")
+	}
+	require.NoError(t, slot.CreateNetwork(t.Context()))
+	t.Cleanup(func() { require.NoError(t, slot.RemoveNetwork(t.Context())) })
+	out, err := exec.CommandContext(t.Context(), "ip", "netns", "exec", slot.NamespaceID(), "cat", "/proc/sys/net/ipv4/ip_forward").Output()
+	require.NoError(t, err)
+	require.Equal(t, "1", strings.TrimSpace(string(out)), "the guest TAP must route through the namespace veth")
+}
 
 type fakeNotExistError struct {
 	notExist bool

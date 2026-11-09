@@ -117,8 +117,8 @@ func TestTemplateCreateRejectionReleasesWork(t *testing.T) {
 	}{
 		{"invalid firecracker", "invalid", "invalid resolved firecracker version", false, nil, codes.OK, ""},
 		{"duplicate build", featureflags.DefaultFirecrackerVersion, "already exists in cache", true, nil, codes.OK, ""},
-		{"no source", featureflags.DefaultFirecrackerVersion, "requires either fromImage or fromTemplate", false, noSource, codes.InvalidArgument, ""},
-		{"empty fromImage", featureflags.DefaultFirecrackerVersion, "requires either fromImage or fromTemplate", false, emptyImage, codes.InvalidArgument, ""},
+		{"no source", featureflags.DefaultFirecrackerVersion, "requires fromImage, fromTemplate or fromKit", false, noSource, codes.InvalidArgument, ""},
+		{"empty fromImage", featureflags.DefaultFirecrackerVersion, "requires fromImage, fromTemplate or fromKit", false, emptyImage, codes.InvalidArgument, ""},
 		{"malformed files hash", featureflags.DefaultFirecrackerVersion, "invalid files hash", false, malformedFilesHash, codes.InvalidArgument, ""},
 		{"malformed cpu template", featureflags.DefaultFirecrackerVersion, "invalid build configuration", false, nil, codes.Internal, `{"x86_tsc_khx":1}`}, // a misspelled key passes LaunchDarkly's JSON check
 	} {

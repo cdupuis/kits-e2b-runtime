@@ -50,6 +50,8 @@ const (
 type SandboxDataFetcher func(ctx context.Context) (SandboxMetadata, *api.APIError)
 
 type SandboxMetadata struct {
+	NativeKitRecreate bool
+
 	Metadata            map[string]string
 	EnvVars             map[string]string
 	Build               queries.EnvBuild
@@ -495,8 +497,9 @@ func (o *Orchestrator) CreateSandbox(
 			VolumeMounts:            sbxData.VolumeMounts,
 			Iam:                     iamToProto(sbxData.Iam),
 		},
-		StartTime: timestamppb.New(startTime),
-		EndTime:   timestamppb.New(endTime),
+		NativeKitRecreate: sbxData.NativeKitRecreate,
+		StartTime:         timestamppb.New(startTime),
+		EndTime:           timestamppb.New(endTime),
 	}
 	if sbxData.FilesystemBoot {
 		// Left absent otherwise, so requests without the rescue are
@@ -568,6 +571,10 @@ func (o *Orchestrator) CreateSandbox(
 				snapshotSandboxID = sbxData.SnapshotSandboxID
 			}
 			o.maybeRemapResumeOriginNode(ctx, snapshotSandboxID, team, sbxData.NodeID, placed.WarmedNode)
+		}
+
+		if sbxData.NativeKitRecreate {
+			return sandbox.Sandbox{}, kitRecreatePlacementAPIError(err)
 		}
 
 		return sandbox.Sandbox{}, placementAPIError(err)

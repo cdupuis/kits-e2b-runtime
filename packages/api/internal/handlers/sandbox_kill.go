@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	kitstorage "github.com/docker/kits-e2b/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -99,6 +100,13 @@ func (a *APIStore) DeleteSandboxesSandboxID(
 		killedOrRemoved = true
 	}
 
+	removed, storageErr := kitstorage.RemoveConfigured(ctx, teamID.String(), sandboxID)
+	if storageErr != nil {
+		a.sendAPIStoreError(c, http.StatusInternalServerError, "Error removing Kit storage; retry deletion")
+
+		return
+	}
+	killedOrRemoved = killedOrRemoved || removed
 	if killedOrRemoved {
 		c.Status(http.StatusNoContent)
 	} else {

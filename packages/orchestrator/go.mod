@@ -29,6 +29,8 @@ require (
 	github.com/caarlos0/env/v11 v11.3.1
 	github.com/containernetworking/plugins v1.9.0
 	github.com/coreos/go-iptables v0.8.0
+	github.com/docker/kits-e2b v0.0.0-20261102212731-f23e47e89c00
+	github.com/docker/sandbox-kit-spec/v3 v3.0.0-m.11.0.20261030173352-0f9ea7ad72dd
 	github.com/dustin/go-humanize v1.0.1
 	github.com/e2b-dev/infra/packages/clickhouse v0.0.0
 	github.com/e2b-dev/infra/packages/shared v0.0.0
@@ -147,8 +149,8 @@ require (
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
-	github.com/containerd/log v0.1.0 // indirect
-	github.com/containerd/platforms v0.2.1 // indirect
+	github.com/containerd/log v0.2.0 // indirect
+	github.com/containerd/platforms v1.0.0-rc.5 // indirect
 	github.com/containernetworking/cni v1.3.0 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/dchest/uniuri v1.2.0 // indirect
@@ -285,7 +287,7 @@ require (
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shopspring/decimal v1.6.0 // indirect
-	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/speakeasy-api/jsonpath v0.6.3 // indirect
 	github.com/speakeasy-api/openapi v1.24.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
@@ -330,4 +332,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apimachinery v0.37.1 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
+	oras.land/oras-go/v2 v2.6.4 // indirect
 )

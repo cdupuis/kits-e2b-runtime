@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	e2b "github.com/docker/kits-e2b"
+	kitstorage "github.com/docker/kits-e2b/storage"
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/launchdarkly/go-sdk-common/v3/ldcontext"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	kitnative "github.com/e2b-dev/infra/packages/orchestrator/pkg/kit"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/build"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/envdbin"
@@ -391,6 +394,95 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 		return nil, fmt.Errorf("failed to read template metadata: %w", err)
 	}
 
+	if req.GetNativeKitRecreate() && (!isResume || !req.GetFilesystemBoot() || meta.Kit == nil || meta.KitInstalled || s.config.NativeKitStorageRoot == "") {
+		return nil, createRefused(ctx, codes.InvalidArgument, "recreation requires a paused native Kit instance and pristine Kit template")
+	}
+
+	var kitPlan *e2b.ExecutionPlan
+	if meta.Kit != nil {
+		policy, ok := s.sandboxFactory.EgressProxy().(interface{ SupportsNativeKitPolicy() bool })
+		if !ok || !policy.SupportsNativeKitPolicy() {
+			return nil, status.Error(codes.FailedPrecondition, "native Kits require the OSS TCP policy proxy")
+		}
+		if meta.KitInstalled && (meta.KitInstanceID != runtime.SandboxID || !req.GetSandbox().GetSnapshot()) {
+			return nil, status.Error(codes.FailedPrecondition, "installed Kit snapshots can only resume their original instance; fork from the original Kit template")
+		}
+		if err := meta.Kit.Plan.CheckResources(config.Vcpu, config.RamMB); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "Kit resources: %s", err)
+		}
+		kitPlan, err = kitnative.Admit(meta.Kit, kitnative.SupportsCredentials(s.sandboxFactory.EgressProxy()))
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "Kit admission: %s", err)
+		}
+		if len(kitPlan.Ports) > 0 && s.config.NativeKitPortsDir == "" {
+			return nil, status.Error(codes.FailedPrecondition, "native Kit port publication is not configured")
+		}
+		if len(kitPlan.Network.Install.Rules) > 0 || len(kitPlan.Network.Runtime.Rules) > 0 {
+			validator, ok := s.sandboxFactory.EgressProxy().(interface {
+				ValidateNativeKitCredentials(ctx context.Context, project string, plan *e2b.ExecutionPlan) error
+			})
+			if !ok {
+				return nil, status.Error(codes.FailedPrecondition, "native Kit secret validation unavailable")
+			}
+			validationPlan := *kitPlan
+			if meta.KitInstalled || len(kitPlan.Install) == 0 {
+				validationPlan.Network.Install = e2b.EgressCandidate{}
+			}
+			if err := validator.ValidateNativeKitCredentials(ctx, runtime.TeamID, &validationPlan); err != nil {
+				return nil, status.Error(codes.FailedPrecondition, "native Kit credentials unavailable for project")
+			}
+		}
+		if len(config.VolumeMounts) != 0 || len(config.Envd.Vars) != 0 || hasKitNetworkOverride(network.GetEgress()) {
+			return nil, status.Error(codes.InvalidArgument, "native Kits own environment, volumes and egress; compose these into the Kit")
+		}
+		requests, err := meta.Kit.StorageRequests()
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "Kit storage: %s", err)
+		}
+		if len(requests) > 0 || s.config.NativeKitStorageRoot != "" {
+			store, err := kitstorage.Open(s.config.NativeKitStorageRoot)
+			if err != nil {
+				return nil, status.Errorf(codes.FailedPrecondition, "Kit storage: %s", err)
+			}
+			if req.GetNativeKitRecreate() {
+				exists, err := store.HasInstance(ctx, runtime.TeamID, runtime.SandboxID)
+				if err != nil {
+					return nil, fmt.Errorf("inspect retained Kit instance: %w", err)
+				}
+				if !exists {
+					return nil, createRefused(ctx, codes.InvalidArgument, "retained Kit instance is unavailable on this worker")
+				}
+			}
+			mounts, lease, err := store.Prepare(ctx, runtime.TeamID, runtime.SandboxID, requests, kitPlan.Workload.Identity.UID, kitPlan.Workload.Identity.GID)
+			if err != nil {
+				if errors.Is(err, kitstorage.ErrIncompatible) {
+					return nil, createRefused(ctx, codes.InvalidArgument, "Kit storage: %s", err)
+				}
+
+				return nil, status.Errorf(codes.FailedPrecondition, "Kit storage: %s", err)
+			}
+			releaseStorage := addKitStorageRollback(ctx, rollback, store, lease, runtime.TeamID, runtime.SandboxID, req.GetSandbox().GetSnapshot())
+			defer releaseStorage()
+			config.NativeKitLease = lease
+			for _, m := range mounts {
+				if m.Volume.Tmpfs {
+					continue
+				}
+				config.VolumeMounts = append(config.VolumeMounts, sandbox.VolumeMountConfig{ID: uuid.MustParse(m.ID), Name: "kit-" + m.ID, Path: m.Volume.Path, Type: kitstorage.VolumeType})
+			}
+		}
+		if network == nil {
+			network = &orchestrator.SandboxNetworkConfig{}
+		}
+		network.Egress = kitEgress(e2b.EgressCandidate{})
+		// Memory resume restores live runtime processes, so their frozen grants
+		// must already be installed when Firecracker unpauses.
+		if meta.KitInstalled && !filesystemBoot(meta, req) {
+			network.Egress = kitEgress(kitPlan.Network.Runtime)
+		}
+		config.SetNetworkEgress(network.GetEgress())
+	}
+
 	fsOnly = meta.IsFilesystemOnly()
 	filesystemBooted = filesystemBoot(meta, req)
 	if filesystemBooted {
@@ -487,7 +579,6 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 	networkMode = sbx.NetworkMode()
 
 	rollback.Add(ctx, func(ctx context.Context) error { return stopAndCloseSandbox(ctx, sbx) })
-	s.setupSandboxLifecycle(ctx, sbx, releaseTemplate)
 
 	// Resume-time envd live-upgrade. The API /resume maps to Create
 	// with snapshot=true, so this is the real resume path. Flag-driven,
@@ -502,6 +593,13 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 			return nil, upErr
 		}
 	}
+
+	if kitPlan != nil {
+		if err := s.initializeKit(ctx, &sbx, meta, kitPlan, filesystemBooted, &releaseTemplate); err != nil {
+			return nil, fmt.Errorf("initialize native Kit: %w", err)
+		}
+	}
+	s.setupSandboxLifecycle(ctx, sbx, releaseTemplate)
 
 	// Promote to the live registry only now — after any resume-time envd upgrade
 	// has run its post-/init and restored the access token — so the sandbox is
@@ -572,6 +670,9 @@ func createVolumeMountModelsFromAPI(volumeMounts []*orchestrator.SandboxVolumeMo
 	results := make([]sandbox.VolumeMountConfig, 0, len(volumeMounts))
 
 	for _, v := range volumeMounts {
+		if v.GetType() == kitstorage.VolumeType {
+			return nil, errors.New("native Kit exports cannot be selected by client volume ID")
+		}
 		volumeID, err := uuid.Parse(v.GetId())
 		if err != nil {
 			errs = append(errs, fmt.Errorf("invalid volume id %q: %w", v.GetId(), err))
@@ -637,6 +738,10 @@ func (s *Server) Update(ctx context.Context, req *orchestrator.SandboxUpdateRequ
 			return nil, status.Error(codes.Unimplemented,
 				"egress proxy is not supported by this orchestrator build")
 		}
+	}
+
+	if req.GetEgress() != nil && sbx.Config.GetNetworkEgress().GetKitPolicy() {
+		return nil, status.Error(codes.FailedPrecondition, "native Kit egress is owned by its resolved declaration")
 	}
 
 	var updates []utils.UpdateFunc
@@ -1973,6 +2078,12 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 		return nil, status.Errorf(codes.Internal, "failed to checkpoint sandbox '%s'", in.GetSandboxId())
 	}
 
+	// Keep the instance fence across the gap between closing the old VM and
+	// constructing its replacement. Each VM holds its own additional reference.
+	if sbx.Config != nil && sbx.Config.NativeKitLease != nil {
+		releaseStorage := sbx.Config.NativeKitLease.Retain()
+		defer releaseStorage()
+	}
 	rollback = sandbox.NewCleanup()
 	rollback.Add(ctx, func(ctx context.Context) error { return steps.stopAndClose(ctx, sbx) })
 
@@ -2470,6 +2581,9 @@ func (s *Server) finishSandboxStartThen(ctx context.Context, reservation *sandbo
 // ended for the operation's cause, a Delete's kill included, as on the
 // checkpoint's exits before it.
 func (s *Server) markSandboxLive(ctx context.Context, sbx *sandbox.Sandbox, reservation *sandbox.Reservation, unlessEnded bool) error {
+	if err := sbx.PublishNativePorts(ctx, s.config.NativeKitPortsDir); err != nil {
+		return err
+	}
 	register := reservation.MarkRunning
 	if unlessEnded {
 		register = reservation.MarkRunningUnlessEnded
