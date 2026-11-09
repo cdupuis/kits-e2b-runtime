@@ -29,6 +29,8 @@ require (
 	github.com/caarlos0/env/v11 v11.3.1
 	github.com/containernetworking/plugins v1.9.0
 	github.com/coreos/go-iptables v0.8.0
+	github.com/docker/kits-e2b v0.0.0-20261102212731-f23e47e89c00
+	github.com/docker/sandbox-kit-spec/v3 v3.0.0-m.11.0.20261030173352-0f9ea7ad72dd
 	github.com/dustin/go-humanize v1.0.1
 	github.com/e2b-dev/infra/packages/clickhouse v0.0.0
 	github.com/e2b-dev/infra/packages/shared v0.0.0
@@ -157,8 +159,6 @@ require (
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect
 	github.com/docker/go-connections v0.7.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/docker/kits-e2b v0.0.0-20261102212731-f23e47e89c00 // indirect
-	github.com/docker/sandbox-kit-spec/v3 v3.0.0-m.11.0.20261030173352-0f9ea7ad72dd // indirect
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect

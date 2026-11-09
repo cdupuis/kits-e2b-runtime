@@ -12,6 +12,7 @@ require (
 	connectrpc.com/cors v0.1.0
 	github.com/awnumar/memguard v0.23.0
 	github.com/creack/pty v1.1.24
+	github.com/docker/kits-e2b v0.0.0-20261102212731-f23e47e89c00
 	github.com/e2b-dev/fsnotify v0.0.2
 	github.com/e2b-dev/infra/packages/shared v0.0.0
 	github.com/getkin/kin-openapi v0.152.0
@@ -36,7 +37,6 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.5 // indirect
 	github.com/dchest/uniuri v1.2.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/kits-e2b v0.0.0-20261102212731-f23e47e89c00 // indirect
 	github.com/docker/sandbox-kit-spec/v3 v3.0.0-m.11.0.20261030173352-0f9ea7ad72dd // indirect
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
