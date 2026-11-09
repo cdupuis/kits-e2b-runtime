@@ -886,7 +886,7 @@ func (c *Cache) copyProcessMemoryFromProc(ctx context.Context, pid int, ranges [
 		if int64(len(data)) != r.Size {
 			release()
 
-			return fmt.Errorf("process memory range exceeds cache size")
+			return errors.New("process memory range exceeds cache size")
 		}
 		for copied := int64(0); copied < r.Size; {
 			if err := ctx.Err(); err != nil {

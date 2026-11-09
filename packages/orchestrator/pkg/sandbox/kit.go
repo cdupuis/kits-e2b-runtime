@@ -33,7 +33,7 @@ func (s *Sandbox) RunKitRequest(ctx context.Context, r guest.Request, workload b
 	// to workload environments when this node supplies egress trust. Hooks
 	// already have their declared environment allowlist applied; adding a name
 	// here would bypass that boundary.
-	r = kitRequestWithTrust(r, workload, s.CABundle != "")
+	r = kitRequestWithTrust(r, workload, s.egressProxy != nil && s.egressProxy.CABundle(s.ExpectedEnvdVersion()) != "")
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return err

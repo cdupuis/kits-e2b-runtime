@@ -29,6 +29,10 @@ const (
 	// superseded: the ID was reclaimed by a new incarnation meanwhile; nothing
 	// was restored, removed, or killed.
 	ApiOrchestratorPauseRefusalRestore CounterType = "api.orchestrator.pause_refusal_restore"
+	// ApiOrchestratorNetworkUpdateUnstored counts network updates a node
+	// applied that the store then failed to record: the live egress differs
+	// from the stored config until the next update replaces both.
+	ApiOrchestratorNetworkUpdateUnstored CounterType = "api.orchestrator.network_update_unstored"
 	// ApiOrchestratorPlacementsWithoutHugepageCeiling counts hugepage sandboxes
 	// placed under a hugepage limit on a node the limit could not bound, by
 	// node.id and reason: no_capacity (the orchestrator reports no pool
@@ -70,6 +74,8 @@ const (
 	// Held post-checkpoint envd re-inits stopped before they returned, by what stopped
 	// them: a following pause, or the sandbox's Firecracker exiting.
 	EnvdReinitCut CounterType = "orchestrator.sandbox.envd.reinit.cut"
+	// Redirects envd answered the host with, which the host refused, by status code.
+	EnvdRedirectsRefused CounterType = "orchestrator.sandbox.envd.redirects_refused"
 	// EnvdCpuReport counts /init responses for VMs with spare vCPUs by the guest's
 	// reported capacity outcome and by why the /init was sent (init: first start,
 	// reinit after a checkpoint, or repeat). The report is diagnostic, not trusted for CPU limits.
@@ -431,7 +437,8 @@ const (
 )
 
 const (
-	OrchestratorSandboxCountMeterName ObservableUpDownCounterType = "orchestrator.env.sandbox.running"
+	OrchestratorSandboxCountMeterName            ObservableUpDownCounterType = "orchestrator.env.sandbox.running"
+	OrchestratorSandboxNetworkModeCountMeterName ObservableUpDownCounterType = "orchestrator.sandbox.running.by_network_mode"
 
 	ClientProxyServerConnectionsMeterCounterName ObservableUpDownCounterType = "client_proxy.proxy.server.connections.open"
 	ClientProxyPoolConnectionsMeterCounterName   ObservableUpDownCounterType = "client_proxy.proxy.pool.connections.open"
@@ -809,6 +816,7 @@ var counterDesc = map[CounterType]string{
 	ApiEvictorAutoPauseDegraded:                  "Timeout auto-pauses the evictor answered with a degrade after a node refusal, by cause: filesystem-only for a busy node (admission_refused | overstay_budget), the memory pause retried without the envd probe (envd_grace), or that retry withheld for want of an execution id (envd_grace_withheld) or because the sweep asks for a filesystem-only capture, which needs the guest agent (envd_grace_fs_only).",
 	ApiOrchestratorResumeOriginNodeRemap:         "Number of resume snapshots repointed to the fallback node a previous resume timed out on",
 	ApiOrchestratorPauseRefusalRestore:           "Outcomes of restoring a sandbox whose pause the node refused retryably, by outcome and caller.",
+	ApiOrchestratorNetworkUpdateUnstored:         "Network updates a node applied that the store failed to record.",
 	ApiSandboxListReads:                          "Sandbox list requests by team and by how the team's store read was served: disabled | read | shared | hit.",
 	BuildResultCounterName:                       "Number of template build results, by result, requested vcpu_sizing (absent|equal|resizable) and built (resizable|not_resizable|none)",
 	BuildCacheResultCounterName:                  "Number of build cache results",
@@ -817,6 +825,7 @@ var counterDesc = map[CounterType]string{
 	EnvdInitCalls:                                "Number of envd initialization calls",
 	EnvdReinitCut:                                "Post-checkpoint envd re-inits stopped before they returned, by what first stopped them, recorded when it did and counted once the re-init returns: pause (a following pause stopped a held one before its pre-pause freeze: cancelled it whatever it had written, or, before its gate chose the held loop, kept it from writing), kill (the sandbox's Firecracker process exited during a held one) or replace (a fresh re-init took its place: cancelled a held one in flight, or kept one from writing on either loop before its gate chose one)",
 	EnvdInitSlowDials:                            "Held envd init dials that took over 500 ms on a first customer start, by how that attempt ended: connect, write, response or success",
+	EnvdRedirectsRefused:                         "Redirects envd answered a host request with, refused rather than followed, by status_code; envd never redirects, so any is unexpected",
 	EnvdInitUnobservedHandlers:                   "Envd /init handlers that thawed the workload inline and completed after their client had gone, as envd counts them on the served /init of a first customer start that succeeded (X-Envd-Init-Unobserved)",
 	EnvdCpuReport:                                "Successful /init responses for VMs with spare vCPUs, by sandbox_type, start_type, outcome, and init (why the /init was sent: first, reinit or repeat)",
 	EnvdCollapseChunks:                           "2 MiB chunks the pre-pause envd heap collapse attempted, by result",
@@ -900,6 +909,7 @@ var counterUnits = map[CounterType]string{
 	ApiEvictorAutoPauseDegraded:                  "{pause}",
 	ApiOrchestratorResumeOriginNodeRemap:         "{snapshot}",
 	ApiOrchestratorPauseRefusalRestore:           "{pause}",
+	ApiOrchestratorNetworkUpdateUnstored:         "{update}",
 	ApiSandboxListReads:                          "{request}",
 	BuildResultCounterName:                       "{build}",
 	BuildCacheResultCounterName:                  "{layer}",
@@ -909,6 +919,7 @@ var counterUnits = map[CounterType]string{
 	EnvdInitUnobservedHandlers:                   "{handler}",
 	EnvdInitSlowDials:                            "{dial}",
 	EnvdReinitCut:                                "{reinit}",
+	EnvdRedirectsRefused:                         "{redirect}",
 	EnvdCpuReport:                                "{response}",
 	EnvdCollapseChunks:                           "{chunk}",
 	OrchestratorSandboxKilledCounterName:         "{sandbox}",
@@ -993,6 +1004,7 @@ var observableCounterUnits = map[ObservableCounterType]string{
 
 var observableUpDownCounterDesc = map[ObservableUpDownCounterType]string{
 	OrchestratorSandboxCountMeterName:                  "Counter of running sandboxes on the orchestrator.",
+	OrchestratorSandboxNetworkModeCountMeterName:       "Running sandboxes by project and assigned network mode.",
 	ClientProxyServerConnectionsMeterCounterName:       "Open connections to the client proxy from load balancer.",
 	ClientProxyPoolConnectionsMeterCounterName:         "Open connections from the client proxy to the orchestrator proxy.",
 	ClientProxyPoolSizeMeterCounterName:                "Size of the client proxy pool.",
@@ -1010,6 +1022,7 @@ var observableUpDownCounterDesc = map[ObservableUpDownCounterType]string{
 
 var observableUpDownCounterUnits = map[ObservableUpDownCounterType]string{
 	OrchestratorSandboxCountMeterName:                  "{sandbox}",
+	OrchestratorSandboxNetworkModeCountMeterName:       "{sandbox}",
 	ClientProxyServerConnectionsMeterCounterName:       "{connection}",
 	ClientProxyPoolConnectionsMeterCounterName:         "{connection}",
 	ClientProxyPoolSizeMeterCounterName:                "{transport}",

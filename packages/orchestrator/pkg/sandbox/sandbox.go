@@ -48,6 +48,7 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	sbxlogger "github.com/e2b-dev/infra/packages/shared/pkg/logger/sandbox"
+	catalog "github.com/e2b-dev/infra/packages/shared/pkg/sandbox-catalog"
 	"github.com/e2b-dev/infra/packages/shared/pkg/sandboxtypes"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
@@ -64,6 +65,7 @@ var (
 	envdInitSlowDials             = utils.Must(telemetry.GetCounter(meter, telemetry.EnvdInitSlowDials))
 	harvestThaw                   = utils.Must(telemetry.GetCounter(meter, telemetry.PauseResumePrefetchHarvestThaw))
 	envdReinitCut                 = utils.Must(telemetry.GetCounter(meter, telemetry.EnvdReinitCut))
+	envdRedirectsRefused          = utils.Must(telemetry.GetCounter(meter, telemetry.EnvdRedirectsRefused))
 	envdCpuReports                = utils.Must(telemetry.GetCounter(meter, telemetry.EnvdCpuReport))
 	waitForEnvdDurationHistogram  = utils.Must(telemetry.GetHistogram(meter, telemetry.WaitForEnvdDurationHistogramName))
 	envdCollapseDurationHistogram = utils.Must(telemetry.GetHistogram(meter, telemetry.EnvdCollapseDurationHistogramName))
@@ -551,7 +553,10 @@ type Sandbox struct {
 	// It was used to store the config to allow API restarts
 	APIStoredConfig *orchestrator.SandboxConfig
 
-	CABundle string
+	// egressProxy chooses the CA bundle each /init sends (newEnvdInitRequest).
+	egressProxy network.EgressProxy
+	// networkHook hears of each envd that answers /init (OnEnvdReady).
+	networkHook NetworkAssignHook
 
 	exit *utils.ErrorOnce
 
@@ -669,6 +674,19 @@ func (s *Sandbox) ReadCommitted(read func(committedUpdates uint64)) {
 // during resume before the sandbox is published, so it needs no locking.
 func (s *Sandbox) UseSyncWP() bool {
 	return s.useSyncWP
+}
+
+// NetworkMode is the mode of the network this execution started on.
+func (s *Sandbox) NetworkMode() catalog.NetworkMode {
+	return networkModeOf(s.NetworkPlacement)
+}
+
+func networkModeOf(placement *orchestrator.SandboxNetworkPlacement) catalog.NetworkMode {
+	if placement == nil {
+		return catalog.NetworkModeLegacy
+	}
+
+	return catalog.NetworkMode(placement.GetNetworkMode())
 }
 
 // MachineVcpus is how many vCPUs the Firecracker VM has, online or not. Pause records it
@@ -1042,12 +1060,13 @@ func (f *Factory) runNetworkAssignHook(ctx context.Context, sbx *Sandbox, reason
 		sbx.log().Warn(ctx, "sandbox network-assign hook failed, continuing",
 			logger.WithLifecycleID(sbx.LifecycleID),
 			zap.Error(err))
-
-		return placement, nil
+		err = nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete the sandbox network: %w", err)
 	}
+	// Set on the start span so failures later in the start keep the mode.
+	telemetry.SetAttributes(ctx, attribute.String("sandbox.network_mode", string(networkModeOf(placement))))
 
 	return placement, nil
 }
@@ -1084,18 +1103,18 @@ func (f *Factory) NewDirectPathMount(backend block.Device, lg logger.Logger) *nb
 	return nbd.NewDirectPathMount(backend, f.devicePool, f.featureFlags, lg)
 }
 
-// PreBootFn is an optional callback invoked after the rootfs is ready but before
-// Firecracker boots. It receives the rootfs device path (e.g., a file path for
-// DirectProvider or /dev/nbdX for NBDProvider) and may modify the filesystem
-// on the host side.
-type PreBootFn func(ctx context.Context, rootfsPath string) error
+// PreBootFn edits or inspects the rootfs at rootfsPath after it is ready and before Firecracker boots.
+// rootfsPath is a file for DirectProvider or /dev/nbdX for NBDProvider.
+// It returns the envd version it put on the rootfs, "" when it left the binary alone.
+type PreBootFn func(ctx context.Context, rootfsPath string) (envdVersion string, err error)
 
 type createOptions struct {
 	deferMarkRunning    bool
 	networkAssignReason NetworkAssignReason
 	// endAt, when set, is the sandbox's end time instead of the timeout
 	// counted from the create.
-	endAt time.Time
+	endAt   time.Time
+	preBoot []PreBootFn
 }
 
 type CreateOption func(*createOptions)
@@ -1118,6 +1137,18 @@ func withNetworkAssignReason(reason NetworkAssignReason) CreateOption {
 // extend it.
 func withEndAt(endAt time.Time) CreateOption {
 	return func(o *createOptions) { o.endAt = endAt }
+}
+
+// WithPreBoot appends pre-boot steps. CreateSandbox runs them in the order given inside the pre-boot span,
+// skipping nil steps and stopping at the first error.
+func WithPreBoot(steps ...PreBootFn) CreateOption {
+	return func(o *createOptions) {
+		for _, step := range steps {
+			if step != nil {
+				o.preBoot = append(o.preBoot, step)
+			}
+		}
+	}
 }
 
 type rootfsLifecycle interface {
@@ -1148,7 +1179,6 @@ func (f *Factory) CreateSandbox(
 	rootfsCachePath string,
 	processOptions fc.ProcessOptions,
 	apiConfigToStore *orchestrator.SandboxConfig,
-	preBootFn PreBootFn,
 	opts ...CreateOption,
 ) (s *Sandbox, e error) {
 	ctx, span := tracer.Start(ctx, "create sandbox")
@@ -1246,16 +1276,26 @@ func (f *Factory) CreateSandbox(
 		return nil, err
 	}
 
-	// Run the optional pre-boot hook before Firecracker starts.
-	// This allows host-side filesystem changes before the guest kernel takes charge.
-	if preBootFn != nil {
+	// Host-side filesystem changes run before the guest kernel takes charge.
+	var offlineEnvdVersion string
+	if len(createOpts.preBoot) > 0 {
 		rootfsPath, pathErr := rootfsProvider.Path()
 		if pathErr != nil {
 			return nil, fmt.Errorf("failed to get rootfs path for pre-boot hook: %w", pathErr)
 		}
 
 		if hookErr := telemetry.Observe0(ctx, tracer, "pre-boot hook", func(ctx context.Context) error {
-			return preBootFn(ctx, rootfsPath)
+			for _, step := range createOpts.preBoot {
+				envdVersion, err := step(ctx, rootfsPath)
+				if err != nil {
+					return err
+				}
+				if envdVersion != "" {
+					offlineEnvdVersion = envdVersion
+				}
+			}
+
+			return nil
 		}); hookErr != nil {
 			return nil, fmt.Errorf("pre-boot hook failed: %w", hookErr)
 		}
@@ -1331,9 +1371,15 @@ func (f *Factory) CreateSandbox(
 
 		APIStoredConfig: apiConfigToStore,
 
-		CABundle: f.egressProxy.CABundle(config.Envd.Version),
+		egressProxy: f.egressProxy,
+		networkHook: f.networkAssignHook,
 
 		exit: exit,
+	}
+
+	// The network-assign hook reads the envd version the guest will boot.
+	if offlineEnvdVersion != "" {
+		sbx.offlineEnvdVersion.Store(&offlineEnvdVersion)
 	}
 
 	sbx.updateAdmission.initialize()
@@ -1972,7 +2018,8 @@ func (f *Factory) ResumeSandbox(
 		featureFlags: f.featureFlags,
 
 		APIStoredConfig: apiConfigToStore,
-		CABundle:        f.egressProxy.CABundle(config.Envd.Version),
+		egressProxy:     f.egressProxy,
+		networkHook:     f.networkAssignHook,
 
 		exit: exit,
 

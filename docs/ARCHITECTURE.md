@@ -92,7 +92,7 @@ flowchart TB
 | Template manager | `packages/orchestrator` (role) | build nodes | Builds templates from Docker images |
 | Client proxy | `packages/client-proxy` | API nodes | Edge router: sandbox URL → correct node |
 | Envd | `packages/envd` | inside every VM | In-VM agent: process/filesystem API for SDKs |
-| Dashboard API | `packages/dashboard-api` | API nodes | Backend for the web dashboard and workspace control plane (sandbox records, admin, `/v1/management`) |
+| Dashboard API | `packages/dashboard-api` | API nodes | Backend for the web dashboard and workspace control plane (sandbox records, user-profile resolution) |
 
 Supporting packages: `packages/shared` (protos, telemetry, storage clients, feature flags),
 `packages/auth` (authentication library), `packages/db` (Postgres migrations + sqlc queries),
@@ -236,7 +236,7 @@ The control-plane entry point (Gin, OpenAPI-generated from `spec/openapi.yml`, p
   client-proxy can wake paused sandboxes on incoming traffic.
 - **Outbox** (`internal/outbox`): a River client on the shared database's `river` schema
   works jobs that need the orchestrator connections. Its job arguments live in
-  `packages/db/pkg/outbox`. The one kind today, `teardown_team_resources`, stops a deleted
+  `packages/db/pkg/outbox`. `teardown_team_resources` stops a deleted
   team's workloads; the API's own project deletion enqueues it. A
   guard runs first on every attempt: a team that exists and is not blocked fails the attempt,
   and the job retries rather than kill a live team's sandboxes; a missing team row does not
@@ -249,7 +249,19 @@ The control-plane entry point (Gin, OpenAPI-generated from `spec/openapi.yml`, p
   Builds are not cancelled: they end on their own build timeout. An attempt is bounded at
   30 minutes; retries back off from 30 seconds to a 15-minute cap, so the 100 attempts last
   about a day before River discards the job and keeps it. Volumes, templates, snapshots and
-  the team row are left alone. Steps report
+  the team row are left alone. `contain_banned_team` kills a banned team's running sandboxes
+  and cancels its builds through the same cleanup as the admin ban; a management ban that
+  turns on enqueues it. Every attempt first reads the team and completes without touching
+  anything when the team is no longer banned or its row is gone. Otherwise it evicts the
+  team's auth cache before the sweep, so no cached credential admits new work behind it, and
+  fails the attempt if the eviction fails. A kill or cancel that fails, or leaves any sandbox
+  or build it could not stop, fails the attempt so the job retries. The job records in its
+  output when its first eviction succeeded, and completes only after a sweep that started a
+  request timeout plus 30 seconds after then; an earlier sweep snoozes the job until that
+  point and sweeps again, so work admitted before that eviction cannot outlive it. It
+  is not unique: a job already running may have read the team before a later ban, so each ban
+  that turns on enqueues its own. An attempt is bounded at 10 minutes; retries and discarding
+  follow the teardown's. Steps report
   `api.outbox.steps.finished` and `api.outbox.step.duration`; finished jobs report
   `outbox.jobs.finished`, and the backlog reports `outbox.jobs` and `outbox.oldest_*_age`.
   `OUTBOX_MAX_WORKERS` (default 10) and `OUTBOX_BACKLOG_INTERVAL` (default 30s) configure it;
@@ -311,17 +323,26 @@ retries.
   auth cache; a failed eviction answers an error so the retry finishes it after commit. The API
   reads this state when admitting billable work. Apart from project deletion, which blocks the
   team for good, this is the only route that writes it.
+- `PUT .../ban` applies a revision-fenced ban state the same way: the `projection.project_bans`
+  revision and `teams.is_banned` commit together, an older or duplicate revision leaves stored
+  state unchanged, and every accepted delivery evicts the team's auth cache, answering an error
+  when the eviction fails. Authentication refuses a banned team's API keys and members. A
+  revision that turns the ban on enqueues `contain_banned_team` (see the outbox above) in the
+  same transaction, so the team's sandboxes and builds are stopped after the call answers; a
+  stale delivery, an unban, or a ban of a team already banned enqueues nothing. A newer
+  revision replaces a ban or unban written by the admin ban routes in between. No ban reason
+  is sent or stored.
 - `DELETE /unstable/management/projects/{projectID}` soft-deletes the project, described below.
 
 The revision fences are the target's for the same reason: the caller can only fence what it
 sends, so two deliveries in flight arrive in whichever order the network gives them, and the older
-one has to be refused where it lands. The project, membership, limits and block writes live in
-`internal/management` with their post-commit cache evictions rather than in the handlers.
+one has to be refused where it lands. The project, membership, limits, block and ban writes live
+in `internal/management` with their post-commit cache evictions rather than in the handlers.
 
-A limits or block delivery may carry `decided_at`, when the caller decided that revision; the
+A limits, block or ban delivery may carry `decided_at`, when the caller decided that revision; the
 ledger row stores it beside the revision. Each delivery the ledger accepts records the seconds
-since then in `dashboard-api.management.apply_lag` with `projection` `project_limits` or
-`project_blocks`; one without `decided_at`
+since then in `dashboard-api.management.apply_lag` with `projection` `project_limits`,
+`project_blocks` or `project_bans`; one without `decided_at`
 counts in `dashboard-api.management.origin_unknown` instead, never as zero lag. Dropped, refused
 and failed deliveries record nothing. The names keep the dashboard-api prefix from when
 dashboard-api served these writes, so the alert and dashboard reading them carry on unchanged.
@@ -349,9 +370,8 @@ it leaves a snapshot); and enqueues the teardown again, which is a no-op while o
 
 Afterwards the API's deleted-project middleware, running after authentication, answers 404 to every
 non-GET route under `/unstable/management/` that names `{projectID}`: the upsert, member, limits,
-block and settings writes. The DELETE is exempt so a retry still reaches it. dashboard-api guards its own
-management and admin writes the same way. Shared auth refuses a membership or API key still left
-for the project with 403, and the API leaves the project out of a user's team list. Volumes, builds
+block, ban and settings writes, and cluster assignment and detachment. The DELETE is exempt so a retry
+still reaches it. Shared auth refuses a membership or API key still left for the project with 403, and the API leaves the project out of a user's team list. Volumes, builds
 and stored artifacts are not reclaimed.
 
 #### Team bans (`/unstable/admin/teams`)
@@ -372,7 +392,46 @@ caller's retry repeats the ban and its containment; banning a banned team contai
 a time, then contains the banned teams, five at a time, all under the one budget, and sorts each team
 into banned, not found or failed; one team's failure does not stop the others. A deleted project
 answers 404 to the single-team routes and counts as not found in the bulk route. The logic lives
-in `internal/team`.
+in `internal/team`. These routes keep no revision; the next management ban delivery the fence accepts
+replaces what they wrote.
+
+#### Cluster lifecycle (`/unstable/management/clusters`)
+
+The owning management service also drives a replay-safe cluster lifecycle under
+`/unstable/management/clusters/{clusterID}` and
+`/unstable/management/projects/{projectID}/cluster/{clusterID}`, with service JWTs only. A caller
+registers a stable cluster UUID, assigns it only to the named project, detaches that exact
+assignment before provider cleanup, and deletes the cluster only after no project references it.
+Replaying the same registration or assignment succeeds. Registering the cluster again with the same
+name and auth organization may change its endpoint, TLS setting, sandbox proxy domain and token, for
+example when the cluster moves to a new domain; the API rebuilds that cluster's clients on its next
+sync and gives sandboxes the new domain. A changed name or auth organization, a different
+assignment, an inexact detach, or deletion of a referenced cluster returns a conflict. The
+assignment does not check the project's tier; the caller decides which projects may use a cluster.
+A cluster first registered through this surface starts without deletion protection; one created any
+other way starts protected, a later registration never changes it, and deleting a protected cluster
+or checking its destroy readiness (`GET .../destroy-readiness`) returns a conflict.
+A caller that deletes a cluster's projects before the cluster first lists them with
+`GET /unstable/management/clusters/{clusterID}/projects`, which returns every project whose team is
+assigned to the cluster however it was assigned, leaving out deleted teams, and records the deletion
+with `PUT /unstable/management/clusters/{clusterID}/deletion` before deleting any of them. That
+request locks the cluster row, returns a conflict while deletion protection is on, and sets
+`clusters.deletion_requested_at`; it succeeds for an absent cluster and on repeat. From then on a
+check constraint keeps deletion protection off, and a trigger on `teams` refuses to newly assign a
+team to the cluster (`cluster_assignment_cluster_deleting` from the assignment route, a conflict
+from the project upsert carrying the cluster ID). The trigger takes a key-share lock on the cluster
+row before it checks, so an assignment either commits before the deletion is recorded, where the
+caller's next listing finds it, or is refused. Deleting each project clears its team's cluster,
+the cluster delete clears it from any team deleted earlier, and then succeeds.
+Registration and assignment rejections carry a stable `error_code` (`cluster_registration_*`,
+`cluster_assignment_*`) in the shared error response; callers use that code rather than the
+human-readable message, and treat uncoded or unknown reasons as generic errors.
+
+The operator dashboard manages clusters through `/unstable/admin/clusters`, with an admin token or
+a service JWT: it lists clusters with their team counts, reads one cluster with its teams, creates
+a cluster (protected from deletion), updates its mutable fields and deletion protection, rotates
+its token, and deletes it with the same checks as the management delete. No route returns a
+cluster's token.
 
 ### Orchestrator (`packages/orchestrator`)
 
@@ -554,9 +613,9 @@ The agent inside every VM (started by systemd very early in boot), port 49983, c
   sandbox URLs. **`pkg/version.go` carries the released version**, maintained by release-please from
   the Conventional Commits merged since the last envd release; do not edit it by hand. The API and
   the orchestrator gate features on the envd version recorded in each template build — the
-  orchestrator's held `/init` is the one gate that reads the version of the envd expected to
-  answer instead (see sandbox creation) — so a behavioral change ships under a `feat`/`fix`
-  commit type that cuts a version it can be gated on.
+  orchestrator's held `/init`, the CA bundle each `/init` sends and the network-assign hook read
+  the version of the envd expected to answer instead (see sandbox creation) — so a behavioral
+  change ships under a `feat`/`fix` commit type that cuts a version it can be gated on.
 
 ### Client proxy (`packages/client-proxy`)
 
@@ -625,60 +684,25 @@ answers 408.
 ### Dashboard API (`packages/dashboard-api`)
 
 A separate REST service (port 3010, spec `spec/openapi-dashboard.yml`) consumed by the web
-dashboard and the workspace control plane, not the SDK: the killed-sandbox record, admin routes
-(clusters, team cluster assignment, user-profile resolution) and the `/v1/management`
-operations. Template reads are served by the API, not here. Its admin routes accept either a
-shared admin token or a short-lived service JWT verified against the configured admin JWKS. The
-sandbox record route accepts dashboard user auth only. Its workspace-agnostic `/v1/management` operations are defined in the
-same dashboard OpenAPI contract and registered on the existing router. Their `AdminJWTAuth`
-OpenAPI security scheme accepts only short-lived service JWTs verified against the workspace-api
-`/.well-known/jwks.json` endpoint, with accepted signing methods derived from each JWK's required
-`alg` metadata. Issuers and audiences are configured through the JSON `ADMIN_AUTH_PROVIDER_CONFIG` value —
-the same config shape as `AUTH_PROVIDER_CONFIG`. Talks to Postgres and ClickHouse; never talks to
-orchestrators. The web dashboard itself is a separate repository (github.com/e2b-dev/dashboard)
+dashboard and the workspace control plane, not the SDK: the killed-sandbox record and an admin
+route that resolves user profiles. Template reads are served by the API, not here. The sandbox
+record route accepts dashboard user auth only. The admin route accepts either a shared admin
+token (`AdminApiKeyAuth`) or a short-lived service JWT (`AdminJWTAuth`) verified against the
+configured admin JWKS, with accepted signing methods derived from each JWK's required `alg`
+metadata. Issuers and audiences are configured through the JSON `ADMIN_AUTH_PROVIDER_CONFIG`
+value — the same config shape as `AUTH_PROVIDER_CONFIG`; without it the admin route accepts only
+the admin token. Talks to Postgres and ClickHouse; never talks to orchestrators. The web dashboard itself is a separate repository (github.com/e2b-dev/dashboard)
 published as an image; E2B Embed runs it on port 3001 beside dashboard-api.
 
 An issuer normally configures at least one accepted audience, binding a JWT to its intended target.
 An issuer may omit `audiences` only with no `audienceMatchPolicy`; this deliberately disables
 audience matching while issuer, signature, and temporal-claim verification remain required.
 
-The `/v1/management` operations are the cluster's half of a contract the workspace residency owns:
-the cluster lifecycle below. Project upsert, membership, limits, block state and deletion are
-served by the API under `/unstable/management/projects/{projectID}`, and team bans under
-`/unstable/admin/teams` (see API above).
-
-The management surface owns a replay-safe cluster lifecycle. A caller registers a stable
-cluster UUID, assigns it only to the named project, detaches that exact assignment before provider
-cleanup, and deletes the cluster only after no project references it. Replaying the same
-registration or assignment succeeds. Registering the cluster again with the same name and auth
-organization may change its endpoint, TLS setting, sandbox proxy domain and token, for example when
-the cluster moves to a new domain; the API rebuilds that cluster's clients on its next sync and gives
-sandboxes the new domain. A changed name or auth organization, a different assignment, an inexact
-detach, or deletion of a referenced cluster returns a conflict. The
-assignment does not check the project's tier; the caller decides which projects may use a cluster.
-A cluster first registered through this surface starts without deletion protection; one created any
-other way starts protected, a later registration never changes it, and deleting a protected cluster
-or checking its destroy readiness returns a conflict.
-A caller that deletes a cluster's projects before the cluster first lists them with
-`GET /v1/management/clusters/{clusterID}/projects`, which returns every project whose team is
-assigned to the cluster however it was assigned, leaving out deleted teams, and records the deletion with
-`PUT /v1/management/clusters/{clusterID}/deletion` before deleting any of them. That request
-locks the cluster row, returns a conflict while deletion protection is on, and sets
-`clusters.deletion_requested_at`; it succeeds for an absent cluster and on repeat. From then on a
-check constraint keeps deletion protection off, and a trigger on `teams` refuses to newly assign a
-team to the cluster (`cluster_assignment_cluster_deleting` from the assignment route, a conflict
-from the API's project upsert carrying the cluster ID). The trigger takes a key-share lock on the cluster row
-before it checks, so an assignment either commits before the deletion is recorded, where the
-caller's next listing finds it, or is refused. Deleting each project clears its team's cluster,
-the cluster delete clears it from any team deleted earlier, and then succeeds.
-The shared error response supports an optional `error_code`, defined by the dashboard OpenAPI
-`ErrorCode` schema. Registration and assignment rejections currently populate it; other errors
-may omit it. Callers use that stable code rather than the human-readable message, and treat
-uncoded or unknown reasons as generic errors.
-
-A project deletion keeps the team row, so dashboard-api middleware, running after
-authentication, answers 404 to every write under `/v1/management/` or `/admin/` that names a
-deleted project by `projectID` or `teamID` (cluster assignment and detachment).
+The cluster's half of the contract the workspace residency owns is served by the API, not here:
+project upsert, membership, limits, block state and deletion under
+`/unstable/management/projects/{projectID}`, the cluster lifecycle under
+`/unstable/management/clusters`, and team bans under `/unstable/admin/teams` (see API above).
+dashboard-api serves no `/v1/management` route.
 
 ## Data stores
 
@@ -769,6 +793,14 @@ the running envd last reported on `/init` when it parses as a version, else the 
 the snapshot recorded at pause, else the version baked into the template build. The first two
 are binaries the orchestrator staged itself; the rest are the guest's word, which only ever
 chooses between the two loops for that guest.
+
+The egress proxy chooses the CA bundle each `/init` carries for the envd version expected to
+answer: the version the last `/init` reported, else the version an offline upgrade put on the
+rootfs, else the version the snapshot recorded, else the template's. After envd answers, the
+network-assign hook may refuse the start, which then fails and cleans up rather than restarting
+on another network. The guest-reported version can steer which bundle later `/init`s carry and,
+through the snapshot record, how the next execution is admitted. A false claim can only keep
+that guest on its worker's network or break its own trust store.
 
 #### Opt-in request idempotency
 
