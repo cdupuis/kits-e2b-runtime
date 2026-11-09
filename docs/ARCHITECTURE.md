@@ -397,7 +397,16 @@ Process shutdown, triggered by `SIGINT`, `SIGTERM`, `SIGUSR1`, or a service fail
 the node to `ShuttingDown` before draining builds and sandboxes. Like `Draining`, this excludes new
 placement while existing work stays reachable, and `/health` returns HTTP 200 with status
 `draining`. Unlike reversible `Draining`, `ShuttingDown` is terminal for the process;
-status overrides cannot enter or leave it. `FORCE_STOP` skips waiting for sandboxes to exit.
+status overrides cannot enter or leave it. `FORCE_STOP` skips build and sandbox drains.
+After gRPC handlers finish, remaining guest processes are stopped concurrently
+and their lifecycle cleanup is joined before NFS, networking, device pools or
+template resources close. This step has its own 30-second cleanup budget even
+on forced stop; it releases port publications and private-storage leases while
+retaining storage for control-plane recovery and deletion decisions.
+Device-pool, template-resource and sandbox-observer cleanup each receive a fresh
+30-second context even when forced stop cancels the drain context. The observer
+shuts down its meter provider, stopping the periodic reader before its exporter;
+without a configured telemetry collector, it starts neither.
 The sandbox drain ends only when no sandbox is live and the node's outstanding work (below) is
 zero, so a create or a resume-fresh checkpoint in flight, whose sandbox is briefly not live, holds
 it until its sandbox goes live and then ends.
