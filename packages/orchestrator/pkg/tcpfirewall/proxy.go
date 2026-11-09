@@ -27,6 +27,7 @@ var _ sandbox.MapSubscriber = (*Proxy)(nil)
 var _ network.EgressProxy = (*Proxy)(nil)
 
 type Proxy struct {
+	kitInjector  *KitInjector
 	logger       logger.Logger
 	sandboxes    *sandbox.Map
 	metrics      *Metrics
@@ -107,6 +108,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 	otherAddr := fmt.Sprintf("0.0.0.0:%d", p.otherPort)
 
 	deps := proxyDeps{
+		kitInjector:  p.kitInjector,
 		metrics:      p.metrics,
 		limiter:      p.limiter,
 		logger:       p.logger,
@@ -202,6 +204,10 @@ func (p *Proxy) Close(_ context.Context) error {
 }
 
 func (p *Proxy) CABundle(_ string) string {
+	if p.kitInjector != nil {
+		return p.kitInjector.bundle
+	}
+
 	return ""
 }
 
@@ -221,11 +227,12 @@ func (p *Proxy) HeadFilterRules(_ *network.Slot) [][]expr.Any {
 // field rather than a positional argument on every handler, every helper down
 // the chain, and every test that drives one.
 type egressConn struct {
-	conn     net.Conn
-	sbx      *sandbox.Sandbox
-	dstIP    net.IP
-	dstPort  int
-	protocol Protocol
+	kitInjector *KitInjector
+	conn        net.Conn
+	sbx         *sandbox.Sandbox
+	dstIP       net.IP
+	dstPort     int
+	protocol    Protocol
 	// tos is the byte stamped on the upstream socket, resolved per connection.
 	tos     int
 	logger  logger.Logger
@@ -244,6 +251,7 @@ type handlerFunc func(ctx context.Context, c egressConn)
 // connections with. Grouped for the same reason as egressConn: one new
 // collaborator is one field, not an edit at all three listeners.
 type proxyDeps struct {
+	kitInjector  *KitInjector
 	metrics      *Metrics
 	limiter      *connlimit.ConnectionLimiter
 	logger       logger.Logger
@@ -329,13 +337,18 @@ func (t *connectionHandler) HandleConn(conn net.Conn) {
 	defer t.deps.limiter.Release(limiterKey)
 
 	t.handler(ctx, egressConn{
-		conn:     conn,
-		sbx:      sbx,
-		dstIP:    ip,
-		dstPort:  port,
-		protocol: t.protocol,
-		tos:      t.deps.egressTOS.For(sbx.Runtime.SandboxType.EgressClass()),
-		logger:   sbxLogger,
-		metrics:  t.deps.metrics,
+		kitInjector: t.deps.kitInjector,
+		conn:        conn,
+		sbx:         sbx,
+		dstIP:       ip,
+		dstPort:     port,
+		protocol:    t.protocol,
+		tos:         t.deps.egressTOS.For(sbx.Runtime.SandboxType.EgressClass()),
+		logger:      sbxLogger,
+		metrics:     t.deps.metrics,
 	})
 }
+
+// SupportsNativeKitPolicy declares the CE Host/SNI enforcement paired with
+// the native Kit firewall. Noop and external proxies do not claim this contract.
+func (p *Proxy) SupportsNativeKitPolicy() bool { return true }

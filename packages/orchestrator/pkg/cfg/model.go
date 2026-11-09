@@ -3,6 +3,7 @@
 package cfg
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,8 +13,10 @@ import (
 	"strings"
 
 	"github.com/caarlos0/env/v11"
+	kitstorage "github.com/docker/kits-e2b/storage"
 	"github.com/willscott/go-nfs"
 
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/kitports"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/network"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
@@ -22,6 +25,8 @@ import (
 const DefaultBusyboxVersion = "1.36.1"
 
 type BuilderConfig struct {
+	NativeKitPortsDir    string `env:"NATIVE_KIT_PORTS_DIR"`
+	NativeKitStorageRoot string `env:"NATIVE_KIT_STORAGE_ROOT"`
 	featureflags.Config
 
 	FirecrackerVersionsDir string `env:"FIRECRACKER_VERSIONS_DIR" envDefault:"/fc-versions"`
@@ -177,6 +182,24 @@ func Parse() (Config, error) {
 		return config, err
 	}
 
+	if config.NativeKitPortsDir != "" {
+		if err := kitports.ValidateDirectory(config.NativeKitPortsDir); err != nil {
+			return config, err
+		}
+	}
+	if config.NativeKitStorageRoot != "" {
+		store, err := kitstorage.Open(config.NativeKitStorageRoot)
+		if err != nil {
+			return config, err
+		}
+		if config.PersistentVolumeMounts == nil {
+			config.PersistentVolumeMounts = map[string]string{}
+		}
+		if _, exists := config.PersistentVolumeMounts[kitstorage.VolumeType]; exists {
+			return config, errors.New("native-kit volume type is reserved")
+		}
+		config.PersistentVolumeMounts[kitstorage.VolumeType] = filepath.Join(store.Root, "data")
+	}
 	if config.PersistentVolumeMounts != nil {
 		for name, path := range config.PersistentVolumeMounts {
 			path = filepath.Clean(path)

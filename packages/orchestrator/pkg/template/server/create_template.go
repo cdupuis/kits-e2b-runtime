@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	kitnative "github.com/e2b-dev/infra/packages/orchestrator/pkg/kit"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/fc"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/fc/cputemplate"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/template/build/builderrors"
@@ -57,8 +58,17 @@ func (s *ServerStore) TemplateCreate(ctx context.Context, templateRequest *templ
 	cfg := templateRequest.GetTemplate()
 	childSpan.SetAttributes(telemetry.WithTemplateID(cfg.GetTemplateID()), telemetry.WithBuildID(cfg.GetBuildID()))
 
-	if cfg.GetFromImage() == "" && cfg.GetFromTemplate() == nil {
-		return nil, status.Error(codes.InvalidArgument, "template build requires either fromImage or fromTemplate")
+	if cfg.GetFromImage() == "" && cfg.GetFromTemplate() == nil && cfg.GetFromKit() == "" {
+		return nil, status.Error(codes.InvalidArgument, "template build requires fromImage, fromTemplate or fromKit")
+	}
+
+	if cfg.GetFromKit() != "" {
+		if _, err := kitnative.DecodeSource([]byte(cfg.GetFromKit())); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid Kit source: %s", err)
+		}
+		if len(cfg.GetSteps()) != 0 || cfg.GetStartCommand() != "" || cfg.GetReadyCommand() != "" || cfg.GetFromImageRegistry() != nil {
+			return nil, status.Error(codes.InvalidArgument, "Kit sources cannot include steps, start commands or registry overrides")
+		}
 	}
 
 	if err := validateMaxVCpuCount(cfg); err != nil {
@@ -229,6 +239,7 @@ func (s *ServerStore) TemplateCreate(ctx context.Context, templateRequest *templ
 		HugePages:            hugePages,
 		FreePageReporting:    freePageReporting,
 		FreePageHinting:      freePageHinting,
+		FromKit:              []byte(cfg.GetFromKit()),
 		FromImage:            cfg.GetFromImage(),
 		FromTemplate:         cfg.GetFromTemplate(),
 		RegistryAuthProvider: authProvider,

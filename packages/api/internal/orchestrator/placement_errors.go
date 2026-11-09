@@ -82,10 +82,11 @@ func createRefusal(st *status.Status) *orchestrator.UserError {
 
 // refusalHTTPStatus is the status a refusal for good answers with: the
 // node's own, trusted only as a server error. A client error would be right
-// only for a field the request carried, and no REST surface carries one
-// today (a create's vcpu comes from the template build row, max_vcpus is
+// only for a field the request carried; an ordinary create carries none
+// (a create's vcpu comes from the template build row, max_vcpus is
 // never set from REST), so the node's 4xx is a stored-data defect, answered
-// as 500 like a status outside 400..599.
+// as 500 like a status outside 400..599. Native Kit replacement requests use
+// kitRecreatePlacementAPIError to recognize explicit client refusals.
 func refusalHTTPStatus(refusal *orchestrator.UserError) int {
 	code := int(refusal.GetHttpStatus())
 	if code < http.StatusInternalServerError || code > 599 {

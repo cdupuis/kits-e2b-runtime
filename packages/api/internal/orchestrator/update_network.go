@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -21,6 +22,9 @@ import (
 	sandbox_network "github.com/e2b-dev/infra/packages/shared/pkg/sandbox-network"
 	"github.com/e2b-dev/infra/packages/shared/pkg/telemetry"
 )
+
+// Keep the node call well inside the sandbox store's one-minute record lease.
+const networkUpdateTimeout = 10 * time.Second
 
 func (o *Orchestrator) UpdateSandboxNetworkConfig(
 	ctx context.Context,
@@ -65,6 +69,16 @@ func (o *Orchestrator) UpdateSandboxNetworkConfig(
 			return sbx, apiErr
 		}
 
+		// Apply under the record lock before changing its saved configuration.
+		// Kit workers refuse egress updates; saving first would make a refused
+		// allow-list visible and feed it into the next resume. The bounded call
+		// also serializes competing updates and pause against this decision.
+		updateCtx, cancel := context.WithTimeout(ctx, networkUpdateTimeout)
+		defer cancel()
+		if apiErr := o.updateSandboxNetworkOnNode(updateCtx, sbx, egress); apiErr != nil {
+			return sbx, apiErr
+		}
+
 		if sbx.Network == nil {
 			sbx.Network = &types.SandboxNetworkConfig{}
 		}
@@ -81,7 +95,7 @@ func (o *Orchestrator) UpdateSandboxNetworkConfig(
 	var sbxNotRunningErr *sandbox.NotRunningError
 	var apiErr *api.APIError
 
-	sbx, err := o.sandboxStore.Update(ctx, teamID, sandboxID, updateFunc)
+	_, err := o.sandboxStore.Update(ctx, teamID, sandboxID, updateFunc)
 	if err != nil {
 		switch {
 		case errors.As(err, &apiErr):
@@ -95,8 +109,7 @@ func (o *Orchestrator) UpdateSandboxNetworkConfig(
 		}
 	}
 
-	// Apply the network update on the orchestrator node.
-	return o.updateSandboxNetworkOnNode(ctx, sbx, egress)
+	return nil
 }
 
 // checkNodeSupportsEgress refuses an egress config that needs a newer

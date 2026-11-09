@@ -123,6 +123,9 @@ message SandboxNetworkEgressConfig {
   repeated string allowed_domains = 3;
   map<string, SandboxNetworkDomainRules> rules = 4;
 
+  // Internal native Kit policy: close DNS, UDP, IPv6 and platform allow exceptions.
+  bool kit_policy = 9;
+
   // BYOP SOCKS5 egress proxy.
   string egress_proxy_address = 5;
   string egress_proxy_username = 6;
@@ -148,6 +151,9 @@ message SandboxNetworkIngressConfig {
 }
 
 message SandboxCreateRequest {
+  // Trusted API-only replacement of a paused native Kit with a pristine template.
+  bool native_kit_recreate = 5;
+
   SandboxConfig sandbox = 1;
 
   google.protobuf.Timestamp start_time = 2;

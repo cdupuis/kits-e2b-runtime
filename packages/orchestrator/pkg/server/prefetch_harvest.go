@@ -507,6 +507,9 @@ func (h *prefetchHarvester) resumeMapping(
 	// throwaway's slot is being configured from it.
 	harvestConfig := sbx.Config.Clone()
 	harvestConfig.VolumeMounts = nil
+	// The source can already be closed when asynchronous harvest starts. No
+	// exports are mounted or granted to this throwaway, so it needs no lease.
+	harvestConfig.NativeKitLease = nil
 
 	// The resumer isolates the throwaway from the network and keeps it out of the
 	// live registry: the user workload stays frozen until envd /init completes and

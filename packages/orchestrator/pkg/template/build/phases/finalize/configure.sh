@@ -10,6 +10,9 @@ TEMPLATE_ID={{ .TemplateID }}
 BUILD_ID={{ .BuildID }}
 EOF
 
+{{ if not .NativeKit }}
+# Ordinary E2B images get the convenience user and writable development paths.
+# Native Kits own their accounts, supplementary groups, homes and permissions.
 # Create default user. useradd is in shadow(-utils) on every supported distro
 # family; -m creates the home dir, -s the shell. A creation failure is a real
 # error — a template whose default user silently doesn't exist fails much more
@@ -98,5 +101,6 @@ echo "Create /code directory"
 mkdir -p /code
 echo "Give 777 permission to /code"
 chmod -R 777 /code
+{{ end }}
 
 echo "Finished configuration script"

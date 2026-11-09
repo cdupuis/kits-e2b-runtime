@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/cfg"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/kit"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/proxy"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	sbxtemplate "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/template"
@@ -205,6 +206,21 @@ func (b *Builder) Build(ctx context.Context, paths storage.Paths, cfg config.Tem
 	}()
 
 	l.Info(ctx, fmt.Sprintf("Building template %s/%s", cfg.TemplateID, paths.BuildID))
+
+	if len(cfg.FromKit) > 0 {
+		if cfg.FromImage != "" || cfg.FromTemplate != nil || len(cfg.Steps) > 0 || cfg.StartCmd != "" || cfg.ReadyCmd != "" || cfg.RegistryAuthProvider != nil {
+			return nil, errors.New("kit sources cannot be combined with image/template sources, build steps, start commands or registry overrides")
+		}
+		prepared, err := kit.Prepare(ctx, cfg.FromKit, utils.TargetArch(), kit.SupportsCredentials(b.sandboxFactory.EgressProxy()), kit.Backends{Storage: b.config.NativeKitStorageRoot != "", Ports: b.config.NativeKitPortsDir != ""})
+		if err != nil {
+			return nil, phases.NewPhaseBuildError(phases.PhaseMeta{}, fmt.Errorf("prepare Kit: %w", err))
+		}
+		defer prepared.Close()
+		if err := prepared.Bundle.Plan.CheckResources(cfg.VCpuCount, cfg.MemoryMB); err != nil {
+			return nil, err
+		}
+		cfg.KitBundle, cfg.KitImage, cfg.FromImage = prepared.Bundle, prepared.Image, prepared.Key
+	}
 
 	defer func(ctx context.Context) {
 		if e == nil {
@@ -418,7 +434,7 @@ func runBuild(
 	if err != nil {
 		return nil, fmt.Errorf("error checking build version: %w", err)
 	}
-	if ok {
+	if ok && bc.Config.KitBundle == nil {
 		builders = append(builders, userBuilder)
 	}
 	builders = append(builders, stepBuilders...)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
+	kitstorage "github.com/docker/kits-e2b/storage"
 	"github.com/google/uuid"
 	"github.com/launchdarkly/go-sdk-common/v3/ldcontext"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/clickhouse/pkg/hoststats"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/cfg"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/kitports"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/build"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/cgroup"
@@ -152,7 +154,8 @@ type Config struct {
 	// time out and tear the sandbox down before a debugger can attach.
 	SkipEnvdWait bool
 
-	VolumeMounts []VolumeMountConfig
+	VolumeMounts   []VolumeMountConfig
+	NativeKitLease *kitstorage.Lease `json:"-"`
 
 	MaxSandboxLengthHours int64
 
@@ -391,6 +394,9 @@ func (a *updateAdmission) closeAndSnapshotActive() <-chan struct{} {
 }
 
 type Sandbox struct {
+	nativePortsMu     sync.Mutex
+	nativePorts       *kitports.Publisher
+	nativePortsClosed bool
 	*Resources
 	*Metadata
 
@@ -1028,6 +1034,10 @@ func (f *Factory) runNetworkAssignHook(ctx context.Context, sbx *Sandbox, reason
 	}()
 
 	placement, err = f.networkAssignHook.OnNetworkAssign(ctx, sbx, reason)
+	if placement != nil && sbx.Config != nil && sbx.Config.GetNetworkEgress().GetKitPolicy() {
+		return nil, errors.New("native Kit policy requires the worker's local network")
+	}
+
 	if _, optional := errors.AsType[optionalNetworkAssignError](err); optional {
 		sbx.log().Warn(ctx, "sandbox network-assign hook failed, continuing",
 			logger.WithLifecycleID(sbx.LifecycleID),
@@ -1155,6 +1165,14 @@ func (f *Factory) CreateSandbox(
 	exit := utils.NewErrorOnce()
 
 	cleanup := NewCleanup()
+	if config.NativeKitLease != nil {
+		release := config.NativeKitLease.Retain()
+		cleanup.Add(ctx, func(context.Context) error {
+			release()
+
+			return nil
+		})
+	}
 	defer func() {
 		if e != nil {
 			cleanupErr := cleanup.Run(ctx)
@@ -1571,6 +1589,14 @@ func (f *Factory) ResumeSandbox(
 	exit := utils.NewErrorOnce()
 
 	cleanup := NewCleanup()
+	if config.NativeKitLease != nil {
+		release := config.NativeKitLease.Retain()
+		cleanup.Add(ctx, func(context.Context) error {
+			release()
+
+			return nil
+		})
+	}
 	defer func() {
 		if e != nil {
 			cleanupErr := cleanup.Run(ctx)
@@ -2212,6 +2238,7 @@ func (s *Sandbox) MemoryHandlerErr() error {
 }
 
 func (s *Sandbox) Close(ctx context.Context) error {
+	portsErr := s.closeNativePorts()
 	// Stop admission, then join the exact live callback before any teardown.
 	// No admission or update lock is held across resource cleanup.
 	if activeDone := s.updateAdmission.closeAndSnapshotActive(); activeDone != nil {
@@ -2223,7 +2250,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	// a writer at this point runs after the whole chain, which would move the
 	// moment the sandbox leaves Get, Items and Count to the very end of teardown,
 	// past every step the registration point was chosen to precede.
-	err := s.cleanup.Run(ctx)
+	err := errors.Join(portsErr, s.cleanup.Run(ctx))
 	if s.sandboxes != nil {
 		s.sandboxes.MarkStopped(context.WithoutCancel(ctx), s)
 	}
@@ -2249,6 +2276,9 @@ func (s *Sandbox) doStop(ctx context.Context) error {
 	defer span.End()
 
 	var errs []error
+	if err := s.closeNativePorts(); err != nil {
+		errs = append(errs, err)
+	}
 
 	// Stop the health checks before stopping the sandbox
 	s.stopping.Store(true)

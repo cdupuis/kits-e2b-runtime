@@ -322,6 +322,10 @@ func (bb *BaseBuilder) Layer(
 			return phases.LayerResult{}, fmt.Errorf("error getting base template: %w", err)
 		}
 
+		if tm.Kit != nil {
+			return phases.LayerResult{}, errors.New("kit templates cannot be used as fromTemplate; compose the Kit references instead")
+		}
+
 		// From template is always cached, never needs to be built
 		return phases.LayerResult{
 			Metadata: tm.BasedOn(sourceMeta),
@@ -343,6 +347,7 @@ func (bb *BaseBuilder) Layer(
 				FirecrackerVersion: bb.Config.FirecrackerVersion,
 			},
 			Context:      cmdMeta,
+			Kit:          bb.Config.KitBundle,
 			FromImage:    &bb.Config.FromImage,
 			FromTemplate: nil,
 			Start:        nil,

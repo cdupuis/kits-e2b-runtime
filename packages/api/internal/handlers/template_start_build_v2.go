@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -35,6 +34,7 @@ const (
 )
 
 type dockerfileStore struct {
+	FromKit      *api.KitSource      `json:"from_kit,omitempty"`
 	FromImage    *string             `json:"from_image"`
 	FromTemplate *string             `json:"from_template"`
 	Steps        *[]api.TemplateStep `json:"steps"`
@@ -111,16 +111,41 @@ func (a *APIStore) PostV2TemplatesTemplateIDBuildsBuildID(c *gin.Context, templa
 
 	hasImage := body.FromImage != nil && *body.FromImage != ""
 	hasTemplate := body.FromTemplate != nil && *body.FromTemplate != ""
-	if hasImage == hasTemplate {
-		message := "must specify either fromImage or fromTemplate"
-		if hasImage {
-			message = "cannot specify both fromImage and fromTemplate"
-		}
-
+	sources := 0
+	if hasImage {
+		sources++
+	}
+	if hasTemplate {
+		sources++
+	}
+	if body.FromKit != nil {
+		sources++
+	}
+	if sources != 1 {
+		message := "must specify exactly one of fromImage, fromTemplate or fromKit"
 		a.sendAPIStoreError(c, http.StatusBadRequest, message)
-		telemetry.ReportErrorByCode(ctx, http.StatusBadRequest, "template build source rejected", errors.New(message), telemetry.WithTemplateID(templateID))
 
 		return
+	}
+	if body.FromKit != nil && (body.FromImageRegistry != nil || (body.Steps != nil && len(*body.Steps) > 0) || body.StartCmd != nil || body.ReadyCmd != nil) {
+		a.sendAPIStoreError(c, http.StatusBadRequest, "Kit sources cannot be combined with build steps, start commands or registry overrides")
+
+		return
+	}
+
+	if body.FromKit != nil {
+		if len(body.FromKit.References) < 1 || len(body.FromKit.References) > 32 {
+			a.sendAPIStoreError(c, http.StatusBadRequest, "Kit source requires 1–32 references")
+
+			return
+		}
+		for _, reference := range body.FromKit.References {
+			if reference == "" || strings.TrimSpace(reference) != reference {
+				a.sendAPIStoreError(c, http.StatusBadRequest, "Kit source requires nonempty references without surrounding whitespace")
+
+				return
+			}
+		}
 	}
 
 	telemetry.ReportEvent(ctx, "started environment build")
@@ -197,6 +222,7 @@ func (a *APIStore) PostV2TemplatesTemplateIDBuildsBuildID(c *gin.Context, templa
 	}
 
 	stepsMarshalled, err := json.Marshal(dockerfileStore{
+		FromKit:      body.FromKit,
 		FromImage:    body.FromImage,
 		FromTemplate: body.FromTemplate,
 		Steps:        body.Steps,
@@ -267,6 +293,7 @@ func (a *APIStore) PostV2TemplatesTemplateIDBuildsBuildID(c *gin.Context, templa
 		clusterID,
 		builderNode.NodeID,
 		version,
+		body.FromKit,
 	)
 
 	a.posthog.CreateAnalyticsTeamEvent(ctx, team.ID.String(), "built environment", posthog.NewProperties().

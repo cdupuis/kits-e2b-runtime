@@ -1,6 +1,9 @@
 package config
 
 import (
+	e2b "github.com/docker/kits-e2b"
+	"github.com/google/go-containerregistry/pkg/v1"
+
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/fc/cputemplate"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/template/build/core/oci/auth"
 	"github.com/e2b-dev/infra/packages/shared/pkg/consts"
@@ -17,6 +20,11 @@ const (
 )
 
 type TemplateConfig struct {
+	// Native Kit source and its validated, build-local image.
+	FromKit   []byte
+	KitBundle *e2b.Bundle
+	KitImage  v1.Image
+
 	// Builder version
 	Version string
 

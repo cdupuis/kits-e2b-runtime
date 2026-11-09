@@ -189,3 +189,17 @@ func TestFactoryRunUpdate(t *testing.T) {
 	require.Equal(t, uint64(2), committed(ordinary))
 	require.Len(t, hook.updated, 1)
 }
+
+func TestNativeKitRefusesPlacedNetworkEvenOnOptionalHookError(t *testing.T) {
+	t.Parallel()
+	for _, hookErr := range []error{nil, OptionalNetworkAssignError(errors.New("optional"))} {
+		sbx := testNetworkAssignHookSandbox()
+		sbx.Config = NewConfig(Config{Network: &orchestrator.SandboxNetworkConfig{Egress: &orchestrator.SandboxNetworkEgressConfig{KitPolicy: true}}})
+		factory := &Factory{networkAssignHook: networkAssignHookFunc(func(context.Context, *Sandbox, NetworkAssignReason) (*orchestrator.SandboxNetworkPlacement, error) {
+			return &orchestrator.SandboxNetworkPlacement{ExecutionId: "elsewhere"}, hookErr
+		})}
+		placement, err := factory.runNetworkAssignHook(t.Context(), sbx, NetworkAssignReasonResume)
+		require.ErrorContains(t, err, "local network")
+		require.Nil(t, placement)
+	}
+}

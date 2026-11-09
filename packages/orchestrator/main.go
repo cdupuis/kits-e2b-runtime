@@ -60,6 +60,10 @@ func defaultEgressFactory(_ context.Context, deps *factories.Deps) (*factories.E
 		deps.FeatureFlags,
 	)
 
+	if err := fw.ConfigureNativeKitCredentials(); err != nil {
+		return nil, err
+	}
+
 	return &factories.EgressSetup{
 		Proxy: fw,
 		Start: fw.Start,

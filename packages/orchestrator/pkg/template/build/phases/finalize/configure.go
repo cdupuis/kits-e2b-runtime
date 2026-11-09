@@ -115,6 +115,7 @@ type ConfigurationParams struct {
 	EnvID      string
 	TemplateID string
 	BuildID    string
+	NativeKit  bool
 }
 
 func runConfiguration(
@@ -133,6 +134,7 @@ func runConfiguration(
 		EnvID:      bc.Config.TemplateID,
 		TemplateID: bc.Config.TemplateID,
 		BuildID:    bc.Template.BuildID,
+		NativeKit:  bc.Config.KitBundle != nil,
 	})
 	if err != nil {
 		return fmt.Errorf("error executing provision script: %w", err)

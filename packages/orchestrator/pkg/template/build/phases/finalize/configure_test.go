@@ -3,6 +3,7 @@
 package finalize
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,59 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// A Kit may already have an unprivileged account named "user". Finalization
+// must not change its identity, grant sudo, chown its home or loosen file modes.
+// Execute the rendered script with only cat available: any account/filesystem
+// mutation command is an error, with no access to the host's command search path.
+func TestNativeKitConfigurationPreservesImageAccountsAndPermissions(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	files := map[string]string{
+		"etc/passwd":             "root:x:0:0::/root:/bin/sh\nuser:x:1000:1000::/home/user:/bin/sh\n",
+		"etc/group":              "root:x:0:\nuser:x:1000:\nsudo:x:27:\n",
+		"etc/shadow":             "user:locked:1::::::\n",
+		"etc/sudoers":            "root ALL=(ALL:ALL) ALL\n",
+		"home/user/.profile":     "# kit-owned shell configuration\n",
+		"usr/local/bin/workload": "#!/bin/sh\nexit 0\n",
+		"code/data":              "kit data\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+	bin := filepath.Join(root, "commands")
+	require.NoError(t, os.Mkdir(bin, 0o700))
+	cat, err := exec.LookPath("cat")
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(cat, filepath.Join(bin, "cat")))
+	var rendered bytes.Buffer
+	require.NoError(t, ConfigureScriptTemplate.Execute(&rendered, ConfigurationParams{TemplateID: "test-template", BuildID: "test-build", NativeKit: true}))
+	// Keep the metadata write inside the fixture even if the script regresses.
+	script := strings.ReplaceAll(rendered.String(), "/.e2b", filepath.Join(root, ".e2b"))
+	for _, prefix := range []string{"/etc/", "/home/", "/usr/local", "/code"} {
+		script = strings.ReplaceAll(script, prefix, root+prefix)
+	}
+	bash, err := exec.LookPath("bash")
+	require.NoError(t, err)
+	cmd := exec.CommandContext(t.Context(), bash, "-c", script)
+	cmd.Env = []string{"PATH=" + bin}
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "Kit finalization attempted a convenience mutation: %s", out)
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, content, string(data), name)
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), name)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".e2b"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), "BUILD_ID=test-build")
+}
 
 // Embedded scripts ship verbatim to the guest shell; a parse error fails every build.
 func requireScriptParses(t *testing.T, shell, name, src string) {

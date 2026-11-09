@@ -696,6 +696,7 @@ type TemplateConfig struct {
 	//
 	//	*TemplateConfig_FromImage
 	//	*TemplateConfig_FromTemplate
+	//	*TemplateConfig_FromKit
 	Source            isTemplateConfig_Source `protobuf_oneof:"source"`
 	FromImageRegistry *FromImageRegistry      `protobuf:"bytes,15,opt,name=fromImageRegistry,proto3,oneof" json:"fromImageRegistry,omitempty"`
 	TeamID            string                  `protobuf:"bytes,16,opt,name=teamID,proto3" json:"teamID,omitempty"`
@@ -852,6 +853,15 @@ func (x *TemplateConfig) GetFromTemplate() *FromTemplateConfig {
 	return nil
 }
 
+func (x *TemplateConfig) GetFromKit() string {
+	if x != nil {
+		if x, ok := x.Source.(*TemplateConfig_FromKit); ok {
+			return x.FromKit
+		}
+	}
+	return ""
+}
+
 func (x *TemplateConfig) GetFromImageRegistry() *FromImageRegistry {
 	if x != nil {
 		return x.FromImageRegistry
@@ -892,9 +902,16 @@ type TemplateConfig_FromTemplate struct {
 	FromTemplate *FromTemplateConfig `protobuf:"bytes,14,opt,name=fromTemplate,proto3,oneof"`
 }
 
+type TemplateConfig_FromKit struct {
+	// Validated KitSource JSON. Kept opaque across the RPC boundary.
+	FromKit string `protobuf:"bytes,19,opt,name=fromKit,proto3,oneof"`
+}
+
 func (*TemplateConfig_FromImage) isTemplateConfig_Source() {}
 
 func (*TemplateConfig_FromTemplate) isTemplateConfig_Source() {}
+
+func (*TemplateConfig_FromKit) isTemplateConfig_Source() {}
 
 type TemplateCreateRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1424,7 +1441,7 @@ const file_template_manager_proto_rawDesc = "" +
 	"\x03aws\x18\x01 \x01(\v2\f.AWSRegistryH\x00R\x03aws\x12 \n" +
 	"\x03gcp\x18\x02 \x01(\v2\f.GCPRegistryH\x00R\x03gcp\x12,\n" +
 	"\ageneral\x18\x03 \x01(\v2\x10.GeneralRegistryH\x00R\ageneralB\x06\n" +
-	"\x04type\"\x8a\x06\n" +
+	"\x04type\"\xa6\x06\n" +
 	"\x0eTemplateConfig\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x01 \x01(\tR\n" +
@@ -1444,7 +1461,8 @@ const file_template_manager_proto_rawDesc = "" +
 	"\x05force\x18\f \x01(\bH\x01R\x05force\x88\x01\x01\x12#\n" +
 	"\x05steps\x18\r \x03(\v2\r.TemplateStepR\x05steps\x12\x1e\n" +
 	"\tfromImage\x18\v \x01(\tH\x00R\tfromImage\x129\n" +
-	"\ffromTemplate\x18\x0e \x01(\v2\x13.FromTemplateConfigH\x00R\ffromTemplate\x12E\n" +
+	"\ffromTemplate\x18\x0e \x01(\v2\x13.FromTemplateConfigH\x00R\ffromTemplate\x12\x1a\n" +
+	"\afromKit\x18\x13 \x01(\tH\x00R\afromKit\x12E\n" +
 	"\x11fromImageRegistry\x18\x0f \x01(\v2\x12.FromImageRegistryH\x02R\x11fromImageRegistry\x88\x01\x01\x12\x16\n" +
 	"\x06teamID\x18\x10 \x01(\tR\x06teamID\x12+\n" +
 	"\x0efreeDiskSizeMB\x18\x11 \x01(\x05H\x03R\x0efreeDiskSizeMB\x88\x01\x01\x12'\n" +
@@ -1623,6 +1641,7 @@ func file_template_manager_proto_init() {
 	file_template_manager_proto_msgTypes[8].OneofWrappers = []any{
 		(*TemplateConfig_FromImage)(nil),
 		(*TemplateConfig_FromTemplate)(nil),
+		(*TemplateConfig_FromKit)(nil),
 	}
 	file_template_manager_proto_msgTypes[9].OneofWrappers = []any{}
 	file_template_manager_proto_msgTypes[10].OneofWrappers = []any{}

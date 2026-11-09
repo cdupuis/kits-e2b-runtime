@@ -193,6 +193,54 @@ func (c *capturingSandboxUpdateClient) Update(_ context.Context, req *orchestrat
 	return &emptypb.Empty{}, nil
 }
 
+type decidingNetworkUpdateClient struct {
+	orchestratorgrpc.SandboxServiceClient
+
+	err      error
+	deadline time.Time
+}
+
+func (c *decidingNetworkUpdateClient) Update(ctx context.Context, _ *orchestratorgrpc.SandboxUpdateRequest, _ ...grpc.CallOption) (*emptypb.Empty, error) {
+	c.deadline, _ = ctx.Deadline()
+
+	return &emptypb.Empty{}, c.err
+}
+
+func TestUpdateSandboxNetworkConfig_NodeRefusalPreservesSavedConfiguration(t *testing.T) {
+	t.Parallel()
+	for _, code := range []codes.Code{codes.FailedPrecondition, codes.Unavailable} {
+		t.Run(code.String(), func(t *testing.T) {
+			t.Parallel()
+			client := &decidingNetworkUpdateClient{err: status.Error(code, "native Kit egress is owned by its resolved declaration")}
+			o := newCreateSandboxTestOrchestrator(t, func(node *nodemanager.TestNode) { node.SetSandboxClient(client) })
+			sbx := addRunningSandbox(t, o)
+			_, err := o.sandboxStore.Update(t.Context(), sbx.TeamID, sbx.SandboxID, func(sbx sandbox.Sandbox) (sandbox.Sandbox, error) {
+				sbx.Network = &types.SandboxNetworkConfig{Egress: &types.SandboxNetworkEgressConfig{AllowedAddresses: []string{"original.example"}}}
+				sbx.AllowInternetAccess = new(false)
+
+				return sbx, nil
+			})
+			require.NoError(t, err)
+			apiErr := o.UpdateSandboxNetworkConfig(t.Context(), sbx.TeamID, sbx.SandboxID, []string{"0.0.0.0/0"}, nil, nil, new(true), nil, nil)
+			require.NotNil(t, apiErr)
+			stored, err := o.sandboxStore.Get(t.Context(), sbx.TeamID, sbx.SandboxID)
+			require.NoError(t, err)
+			require.Equal(t, []string{"original.example"}, stored.Network.Egress.AllowedAddresses)
+			require.NotNil(t, stored.AllowInternetAccess)
+			require.False(t, *stored.AllowInternetAccess)
+			require.False(t, client.deadline.IsZero(), "the node call must not outlive the record lease")
+			require.LessOrEqual(t, time.Until(client.deadline), networkUpdateTimeout)
+
+			client.err = nil
+			require.Nil(t, o.UpdateSandboxNetworkConfig(t.Context(), sbx.TeamID, sbx.SandboxID, []string{"accepted.example"}, nil, nil, new(true), nil, nil))
+			stored, err = o.sandboxStore.Get(t.Context(), sbx.TeamID, sbx.SandboxID)
+			require.NoError(t, err)
+			require.Equal(t, []string{"accepted.example"}, stored.Network.Egress.AllowedAddresses)
+			require.True(t, *stored.AllowInternetAccess)
+		})
+	}
+}
+
 // An update replaces dnsServers like every other egress field: leaving it out
 // resets it to the default, which allows the default nameserver.
 func TestUpdateSandboxNetworkConfig_DnsServers(t *testing.T) {
